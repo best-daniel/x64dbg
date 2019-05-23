@@ -7,7 +7,7 @@ SCRIPT_EXPORT bool Script::Bookmark::Set(duint addr, bool manual)
     return BookmarkSet(addr, manual);
 }
 
-bool Script::Bookmark::Set(const BookmarkInfo* info)
+SCRIPT_EXPORT bool Script::Bookmark::Set(const BookmarkInfo* info)
 {
     if(!info)
         return false;
@@ -29,7 +29,7 @@ SCRIPT_EXPORT bool Script::Bookmark::GetInfo(duint addr, BookmarkInfo* info)
         return false;
     if(info)
     {
-        strcpy_s(info->mod, comment.mod);
+        strcpy_s(info->mod, comment.mod().c_str());
         info->rva = comment.addr;
         info->manual = comment.manual;
     }
@@ -43,7 +43,7 @@ SCRIPT_EXPORT bool Script::Bookmark::Delete(duint addr)
 
 SCRIPT_EXPORT void Script::Bookmark::DeleteRange(duint start, duint end)
 {
-    BookmarkDelRange(start, end);
+    BookmarkDelRange(start, end, false);
 }
 
 SCRIPT_EXPORT void Script::Bookmark::Clear()
@@ -60,7 +60,7 @@ SCRIPT_EXPORT bool Script::Bookmark::GetList(ListOf(BookmarkInfo) list)
     for(const auto & bookmark : bookmarkList)
     {
         BookmarkInfo scriptComment;
-        strcpy_s(scriptComment.mod, bookmark.mod);
+        strcpy_s(scriptComment.mod, bookmark.mod().c_str());
         scriptComment.rva = bookmark.addr;
         scriptComment.manual = bookmark.manual;
         bookmarkScriptList.push_back(scriptComment);

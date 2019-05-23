@@ -1,24 +1,29 @@
 #include "CPUInfoBox.h"
 #include "Configuration.h"
+#include "WordEditDialog.h"
+#include "XrefBrowseDialog.h"
 #include "Bridge.h"
 
 CPUInfoBox::CPUInfoBox(StdTable* parent) : StdTable(parent)
 {
+    setWindowTitle("InfoBox");
     enableMultiSelection(false);
     setShowHeader(false);
     addColumnAt(0, "", true);
-    setRowCount(3);
+    setRowCount(4);
     setCellContent(0, 0, "");
     setCellContent(1, 0, "");
     setCellContent(2, 0, "");
+    setCellContent(3, 0, "");
     setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
-    horizontalScrollBar()->setStyleSheet("QScrollBar:horizontal{border:1px solid grey;background:#f1f1f1;height:10px}QScrollBar::handle:horizontal{background:#aaa;min-width:20px;margin:1px}QScrollBar::add-line:horizontal,QScrollBar::sub-line:horizontal{width:0;height:0}");
+    setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    horizontalScrollBar()->setStyleSheet(ConfigHScrollBarStyle());
 
     int height = getHeight();
-    setMaximumHeight(height);
     setMinimumHeight(height);
+
     connect(Bridge::getBridge(), SIGNAL(dbgStateChanged(DBGSTATE)), this, SLOT(dbgStateChanged(DBGSTATE)));
+    connect(Bridge::getBridge(), SIGNAL(addInfoLine(QString)), this, SLOT(addInfoLine(QString)));
     connect(this, SIGNAL(contextMenuSignal(QPoint)), this, SLOT(contextMenuSlot(QPoint)));
     connect(this, SIGNAL(doubleClickedSignal()), this, SLOT(doubleClickedSlot()));
     curAddr = 0;
@@ -31,19 +36,21 @@ CPUInfoBox::CPUInfoBox(StdTable* parent) : StdTable(parent)
 
 void CPUInfoBox::setupContextMenu()
 {
-    mCopyAddressAction = makeAction("Address", SLOT(copyAddress()));
-    mCopyRvaAction = makeAction("RVA", SLOT(copyRva()));
-    mCopyOffsetAction = makeAction("File Offset", SLOT(copyOffset()));
+    mCopyAddressAction = makeAction(tr("Address"), SLOT(copyAddress()));
+    mCopyRvaAction = makeAction(tr("RVA"), SLOT(copyRva()));
+    mCopyOffsetAction = makeAction(tr("File Offset"), SLOT(copyOffset()));
+    mCopyLineAction = makeAction(tr("Copy Line"), SLOT(copyLineSlot()));
+    setupShortcuts();
 }
 
 int CPUInfoBox::getHeight()
 {
-    return ((getRowHeight() + 1) * 3) + 10;
+    return ((getRowHeight() + 1) * 4);
 }
 
 void CPUInfoBox::setInfoLine(int line, QString text)
 {
-    if(line < 0 || line > 2)
+    if(line < 0 || line > 3)
         return;
 
     setCellContent(line, 0, text);
@@ -52,56 +59,28 @@ void CPUInfoBox::setInfoLine(int line, QString text)
 
 QString CPUInfoBox::getInfoLine(int line)
 {
-    if(line < 0 || line > 2)
-        return "";
+    if(line < 0 || line > 3)
+        return QString();
 
     return getCellContent(line, 0);
 }
 
+void CPUInfoBox::addInfoLine(const QString & infoLine)
+{
+    auto rowCount = getRowCount();
+    setRowCount(rowCount + 1);
+    setCellContent(rowCount, 0, infoLine);
+    reloadData();
+}
+
 void CPUInfoBox::clear()
 {
-    // Set all 3 lines to empty strings
+    // Set all 4 lines to empty strings
+    setRowCount(4);
     setInfoLine(0, "");
     setInfoLine(1, "");
     setInfoLine(2, "");
-}
-
-QString CPUInfoBox::getSymbolicName(dsint addr)
-{
-    char labelText[MAX_LABEL_SIZE] = "";
-    char moduleText[MAX_MODULE_SIZE] = "";
-    char string[MAX_STRING_SIZE] = "";
-    bool bHasString = DbgGetStringAt(addr, string);
-    bool bHasLabel = DbgGetLabelAt(addr, SEG_DEFAULT, labelText);
-    bool bHasModule = (DbgGetModuleAt(addr, moduleText) && !QString(labelText).startsWith("JMP.&"));
-    QString addrText;
-    addrText = QString("%1").arg(addr & (duint) - 1, 0, 16, QChar('0')).toUpper();
-    QString finalText;
-    if(bHasString)
-        finalText = addrText + " " + QString(string);
-    else if(bHasLabel && bHasModule) //<module.label>
-        finalText = QString("<%1.%2>").arg(moduleText).arg(labelText);
-    else if(bHasModule) //module.addr
-        finalText = QString("%1.%2").arg(moduleText).arg(addrText);
-    else if(bHasLabel) //<label>
-        finalText = QString("<%1>").arg(labelText);
-    else
-    {
-        finalText = addrText;
-        if(addr == (addr & 0xFF))
-        {
-            QChar c = QChar::fromLatin1((char)addr);
-            if(c.isPrint())
-                finalText += QString(" '%1'").arg((char)addr);
-        }
-        else if(addr == (addr & 0xFFF)) //UNICODE?
-        {
-            QChar c = QChar::fromLatin1((wchar_t)addr);
-            if(c.isPrint())
-                finalText += " L'" + QString(c) + "'";
-        }
-    }
-    return finalText;
+    setInfoLine(3, "");
 }
 
 void CPUInfoBox::disasmSelectionChanged(dsint parVA)
@@ -113,9 +92,11 @@ void CPUInfoBox::disasmSelectionChanged(dsint parVA)
     if(!DbgIsDebugging() || !DbgMemIsValidReadPtr(parVA))
         return;
 
-    // Rather than using clear() or setInfoLine(), only reset the first two cells to reduce flicker
+    // Rather than using clear() or setInfoLine(), only reset the first three cells to reduce flicker
+    setRowCount(4);
     setCellContent(0, 0, "");
     setCellContent(1, 0, "");
+    setCellContent(2, 0, "");
 
     DISASM_INSTR instr;
     memset(&instr, 0, sizeof(instr));
@@ -129,9 +110,9 @@ void CPUInfoBox::disasmSelectionChanged(dsint parVA)
     {
         bool taken = DbgIsJumpGoingToExecute(parVA);
         if(taken)
-            setInfoLine(0, "Jump is taken");
+            setInfoLine(0, tr("Jump is taken"));
         else
-            setInfoLine(0, "Jump is not taken");
+            setInfoLine(0, tr("Jump is not taken"));
         start = 1;
     }
 
@@ -145,66 +126,207 @@ void CPUInfoBox::disasmSelectionChanged(dsint parVA)
             argMnemonic = argMnemonic.toUpper();
         if(arg.type == arg_memory)
         {
+            bool ok;
+            argMnemonic.toULongLong(&ok, 16);
+            QString valText = DbgMemIsValidReadPtr(arg.value) ? ToPtrString(arg.value) : ToHexString(arg.value);
+            auto valTextSym = getSymbolicNameStr(arg.value);
+            if(!valTextSym.contains(valText))
+                valText = QString("%1 %2").arg(valText, valTextSym);
+            else
+                valText = valTextSym;
+            argMnemonic = !ok ? QString("%1]=[%2").arg(argMnemonic).arg(valText) : valText;
             QString sizeName = "";
-            int memsize = basicinfo.memory.size;
-            switch(memsize)
+            bool knownsize = true;
+            switch(basicinfo.memory.size)
             {
             case size_byte:
-                sizeName = "byte ";
+                sizeName = "byte ptr ";
                 break;
             case size_word:
-                sizeName = "word ";
+                sizeName = "word ptr ";
                 break;
             case size_dword:
-                sizeName = "dword ";
+                sizeName = "dword ptr ";
                 break;
+#ifdef _WIN64
             case size_qword:
-                sizeName = "qword ";
+                sizeName = "qword ptr ";
+                break;
+#endif //_WIN64
+            default:
+                knownsize = false;
                 break;
             }
+
+            sizeName += [](SEGMENTREG seg)
+            {
+                switch(seg)
+                {
+                case SEG_ES:
+                    return "es:";
+                case SEG_DS:
+                    return "ds:";
+                case SEG_FS:
+                    return "fs:";
+                case SEG_GS:
+                    return "gs:";
+                case SEG_CS:
+                    return "cs:";
+                case SEG_SS:
+                    return "ss:";
+                default:
+                    return "";
+                }
+            }(arg.segment);
 
             if(bUpper)
                 sizeName = sizeName.toUpper();
 
             if(!DbgMemIsValidReadPtr(arg.value))
-                setInfoLine(j, sizeName + "[" + argMnemonic + "]=???");
-            else
             {
-                QString addrText;
-                if(memsize == sizeof(dsint))
-                    addrText = getSymbolicName(arg.memvalue);
-                else
-                    addrText = QString("%1").arg(arg.memvalue, memsize * 2, 16, QChar('0')).toUpper();
+                setInfoLine(j, sizeName + "[" + argMnemonic + "]=???");
+            }
+            else if(knownsize)
+            {
+                QString addrText = getSymbolicNameStr(arg.memvalue);
                 setInfoLine(j, sizeName + "[" + argMnemonic + "]=" + addrText);
             }
+            else
+            {
+                //TODO: properly support XMM constants
+                QVector<unsigned char> data;
+                data.resize(basicinfo.memory.size);
+                memset(data.data(), 0, data.size());
+                if(DbgMemRead(arg.value, data.data(), data.size()))
+                {
+                    QString hex;
+                    hex.reserve(data.size() * 3);
+                    for(int k = 0; k < data.size(); k++)
+                    {
+                        if(k)
+                            hex.append(' ');
+                        hex.append(ToByteString(data[k]));
+                    }
+                    setInfoLine(j, sizeName + "[" + argMnemonic + "]=" + hex);
+                }
+                else
+                {
+                    setInfoLine(j, sizeName + "[" + argMnemonic + "]=???");
+                }
+            }
+
             j++;
         }
         else
         {
+            QString valText = DbgMemIsValidReadPtr(arg.value) ? ToPtrString(arg.value) : ToHexString(arg.value);
+            auto symbolicName = getSymbolicNameStr(arg.value);
+            if(!symbolicName.contains(valText))
+                valText = QString("%1 (%2)").arg(symbolicName, valText);
+            else
+                valText = symbolicName;
             QString mnemonic(arg.mnemonic);
             bool ok;
             mnemonic.toULongLong(&ok, 16);
-            if(ok) //skip numbers
-                continue;
-            setInfoLine(j, mnemonic + "=" + getSymbolicName(arg.value));
-            j++;
+            if(ok) //skip certain numbers
+            {
+                if(ToHexString(arg.value) == symbolicName)
+                    continue;
+                setInfoLine(j, symbolicName);
+            }
+            else if(!mnemonic.startsWith("xmm") && //TODO: properly handle display of these registers
+                    !mnemonic.startsWith("ymm") &&
+                    !mnemonic.startsWith("st"))
+            {
+                setInfoLine(j, mnemonic + "=" + valText);
+                j++;
+            }
         }
     }
     if(getInfoLine(0) == getInfoLine(1)) //check for duplicate info line
         setInfoLine(1, "");
 
+    // check references details
+    // code extracted from ExtraInfo plugin by torusrxxx
+    XREF_INFO xrefInfo;
+    xrefInfo.refcount = 0;
+    xrefInfo.references = nullptr;
+
+    if(DbgXrefGet(parVA, &xrefInfo) && xrefInfo.refcount > 0)
+    {
+        QString output;
+        std::vector<XREF_RECORD*> data;
+        for(duint i = 0; i < xrefInfo.refcount; i++)
+            data.push_back(&xrefInfo.references[i]);
+
+        std::sort(data.begin(), data.end(), [](const XREF_RECORD * A, const XREF_RECORD * B)
+        {
+            if(A->type != B->type)
+                return (A->type < B->type);
+
+            return (A->addr < B->addr);
+        });
+
+        int t = XREF_NONE;
+        duint i;
+
+        for(i = 0; i < xrefInfo.refcount && i < 10; i++)
+        {
+            if(t != data[i]->type)
+            {
+                switch(data[i]->type)
+                {
+                case XREF_JMP:
+                    output += tr("Jump from ");
+                    break;
+                case XREF_CALL:
+                    output += tr("Call from ");
+                    break;
+                default:
+                    output += tr("Reference from ");
+                    break;
+                }
+
+                t = data[i]->type;
+            }
+
+            char clabel[MAX_LABEL_SIZE] = "";
+
+            DbgGetLabelAt(data[i]->addr, SEG_DEFAULT, clabel);
+            if(*clabel)
+                output += QString(clabel);
+            else
+            {
+                duint start;
+                if(DbgFunctionGet(data[i]->addr, &start, nullptr) && DbgGetLabelAt(start, SEG_DEFAULT, clabel) && start != data[i]->addr)
+                    output += QString("%1+%2").arg(clabel).arg(ToHexString(data[i]->addr - start));
+                else
+                    output += QString("%1").arg(ToHexString(data[i]->addr));
+            }
+
+            if(i != xrefInfo.refcount - 1)
+                output += ", ";
+        }
+
+        data.clear();
+        if(xrefInfo.refcount > 10)
+            output += "...";
+
+        setInfoLine(2, output);
+    }
+
     // Set last line
     //
-    // Format: SECTION:VA MODULE:$RVA :#FILE_OFFSET FUNCTION
+    // Format: SECTION:VA MODULE:$RVA :#FILE_OFFSET FUNCTION, Accessed %u times
     QString info;
 
     // Section
-    char section[MAX_SECTION_SIZE];
+    char section[MAX_SECTION_SIZE * 5];
     if(DbgFunctions()->SectionFromAddr(parVA, section))
         info += QString(section) + ":";
 
     // VA
-    info += ToPtrString(parVA) + " ";
+    info += ToPtrString(parVA);
 
     // Module name, RVA, and file offset
     char mod[MAX_MODULE_SIZE];
@@ -213,24 +335,38 @@ void CPUInfoBox::disasmSelectionChanged(dsint parVA)
         dsint modbase = DbgFunctions()->ModBaseFromAddr(parVA);
 
         // Append modname
-        info += mod;
+        info += " " + QString(mod);
 
         // Module RVA
         curRva = parVA - modbase;
         if(modbase)
-            info += QString(":$%1 ").arg(curRva, 0, 16, QChar('0')).toUpper();
+            info += QString(":$%1").arg(ToHexString(curRva));
 
         // File offset
         curOffset = DbgFunctions()->VaToFileOffset(parVA);
-        info += QString("#%1 ").arg(curOffset, 0, 16, QChar('0')).toUpper();
+        info += QString(" #%1").arg(ToHexString(curOffset));
     }
 
     // Function/label name
     char label[MAX_LABEL_SIZE];
     if(DbgGetLabelAt(parVA, SEG_DEFAULT, label))
-        info += "<" + QString(label) + ">";
+        info += QString(" <%1>").arg(label);
+    else
+    {
+        duint start;
+        if(DbgFunctionGet(parVA, &start, nullptr) && DbgGetLabelAt(start, SEG_DEFAULT, label) && start != parVA)
+            info += QString(" <%1+%2>").arg(label).arg(ToHexString(parVA - start));
+    }
 
-    setInfoLine(2, info);
+    auto tracedCount = DbgFunctions()->GetTraceRecordHitCount(parVA);
+    if(tracedCount != 0)
+    {
+        info += ", " + tr("Accessed %n time(s)", nullptr, tracedCount);
+    }
+
+    setInfoLine(3, info);
+
+    DbgSelChanged(GUI_DISASSEMBLY, parVA);
 }
 
 void CPUInfoBox::dbgStateChanged(DBGSTATE state)
@@ -239,29 +375,61 @@ void CPUInfoBox::dbgStateChanged(DBGSTATE state)
         clear();
 }
 
+/**
+ * @brief CPUInfoBox::followActionSlot Called when follow or watch action is clicked
+ */
 void CPUInfoBox::followActionSlot()
 {
     QAction* action = qobject_cast<QAction*>(sender());
     if(action && action->objectName().startsWith("DUMP|"))
-        DbgCmdExec(QString().sprintf("dump \"%s\"", action->objectName().mid(5).toUtf8().constData()).toUtf8().constData());
+        DbgCmdExec(QString("dump \"%1\"").arg(action->objectName().mid(5)).toUtf8().constData());
+    else if(action && action->objectName().startsWith("WATCH|"))
+        DbgCmdExec(QString("AddWatch \"[%1]\"").arg(action->objectName().mid(6)).toUtf8().constData());
 }
 
-void CPUInfoBox::addFollowMenuItem(QMenu* menu, QString name, dsint value)
+void CPUInfoBox::modifySlot()
 {
-    foreach(QAction * action, menu->actions()) //check for duplicate action
-    if(action->text() == name)
+    QAction* action = qobject_cast<QAction*>(sender());
+    if(action)
+    {
+        duint addrVal = 0;
+        DbgFunctions()->ValFromString(action->objectName().toUtf8().constData(), &addrVal);
+        WordEditDialog wEditDialog(this);
+        dsint value = 0;
+        DbgMemRead(addrVal, &value, sizeof(dsint));
+        wEditDialog.setup(tr("Modify Value"), value, sizeof(dsint));
+        if(wEditDialog.exec() != QDialog::Accepted)
+            return;
+        value = wEditDialog.getVal();
+        DbgMemWrite(addrVal, &value, sizeof(dsint));
+        GuiUpdateAllViews();
+    }
+}
+
+void CPUInfoBox::findXReferencesSlot()
+{
+    if(!DbgIsDebugging())
         return;
-    QAction* newAction = new QAction(name, this);
-    newAction->setFont(QFont("Courier New", 8));
-    menu->addAction(newAction);
-    newAction->setObjectName(QString("DUMP|") + QString("%1").arg(value, sizeof(dsint) * 2, 16, QChar('0')).toUpper());
-    connect(newAction, SIGNAL(triggered()), this, SLOT(followActionSlot()));
+    if(!mXrefDlg)
+        mXrefDlg = new XrefBrowseDialog(this);
+    mXrefDlg->setup(curAddr);
+    mXrefDlg->showNormal();
 }
 
-void CPUInfoBox::setupFollowMenu(QMenu* menu, dsint wVA)
+void CPUInfoBox::addModifyValueMenuItem(QMenu* menu, QString name, duint value)
 {
-    //most basic follow action
-    addFollowMenuItem(menu, "&Selected Address", wVA);
+    foreach(QAction* action, menu->actions()) //check for duplicate action
+        if(action->text() == name)
+            return;
+    QAction* newAction = new QAction(name, menu);
+    menu->addAction(newAction);
+    newAction->setObjectName(ToPtrString(value));
+    connect(newAction, SIGNAL(triggered()), this, SLOT(modifySlot()));
+}
+
+void CPUInfoBox::setupModifyValueMenu(QMenu* menu, duint wVA)
+{
+    menu->setIcon(DIcon("modify.png"));
 
     //add follow actions
     DISASM_INSTR instr;
@@ -272,21 +440,157 @@ void CPUInfoBox::setupFollowMenu(QMenu* menu, dsint wVA)
         const DISASM_ARG arg = instr.arg[i];
         if(arg.type == arg_memory)
         {
+            QString segment = "";
+#ifdef _WIN64
+            if(arg.segment == SEG_GS)
+                segment = "gs:";
+#else //x32
+            if(arg.segment == SEG_FS)
+                segment = "fs:";
+#endif //_WIN64
             if(DbgMemIsValidReadPtr(arg.value))
-                addFollowMenuItem(menu, "&Address: " + QString(arg.mnemonic).toUpper().trimmed(), arg.value);
+                addModifyValueMenuItem(menu, tr("&Address: ") + segment + QString(arg.mnemonic).toUpper().trimmed(), arg.value);
             if(arg.value != arg.constant)
             {
-                QString constant = QString("%1").arg(arg.constant, 1, 16, QChar('0')).toUpper();
+                QString constant = QString("%1").arg(ToHexString(arg.constant));
                 if(DbgMemIsValidReadPtr(arg.constant))
-                    addFollowMenuItem(menu, "&Constant: " + constant, arg.constant);
+                    addModifyValueMenuItem(menu, tr("&Constant: ") + constant, arg.constant);
             }
             if(DbgMemIsValidReadPtr(arg.memvalue))
-                addFollowMenuItem(menu, "&Value: [" + QString(arg.mnemonic) + "]", arg.memvalue);
+                addModifyValueMenuItem(menu, tr("&Value: ") + segment + "[" + QString(arg.mnemonic).toUpper().trimmed() + "]", arg.memvalue);
+        }
+        else
+        {
+            if(DbgMemIsValidReadPtr(arg.value))
+                addModifyValueMenuItem(menu, "&Value: [" + QString(arg.mnemonic).toUpper().trimmed() + "]", arg.value);
+        }
+    }
+}
+
+/**
+ * @brief CPUInfoBox::addFollowMenuItem Add a follow action to the menu
+ * @param menu The menu to which the follow action adds
+ * @param name The user-friendly name of the action
+ * @param value The VA of the address
+ */
+void CPUInfoBox::addFollowMenuItem(QMenu* menu, QString name, duint value)
+{
+    foreach(QAction* action, menu->actions()) //check for duplicate action
+        if(action->text() == name)
+            return;
+    QAction* newAction = new QAction(name, menu);
+    menu->addAction(newAction);
+    newAction->setObjectName(QString("DUMP|") + ToPtrString(value));
+    connect(newAction, SIGNAL(triggered()), this, SLOT(followActionSlot()));
+}
+
+/**
+ * @brief CPUInfoBox::setupFollowMenu Set up a follow menu.
+ * @param menu The menu to create
+ * @param wVA The selected VA
+ */
+void CPUInfoBox::setupFollowMenu(QMenu* menu, duint wVA)
+{
+    menu->setIcon(DIcon("dump.png"));
+    //most basic follow action
+    addFollowMenuItem(menu, tr("&Selected Address"), wVA);
+
+    //add follow actions
+    DISASM_INSTR instr;
+    DbgDisasmAt(wVA, &instr);
+
+    for(int i = 0; i < instr.argcount; i++)
+    {
+        const DISASM_ARG arg = instr.arg[i];
+        if(arg.type == arg_memory)
+        {
+            QString segment = "";
+#ifdef _WIN64
+            if(arg.segment == SEG_GS)
+                segment = "gs:";
+#else //x32
+            if(arg.segment == SEG_FS)
+                segment = "fs:";
+#endif //_WIN64
+            if(DbgMemIsValidReadPtr(arg.value))
+                addFollowMenuItem(menu, tr("&Address: ") + segment + QString(arg.mnemonic).toUpper().trimmed(), arg.value);
+            if(arg.value != arg.constant)
+            {
+                QString constant = QString("%1").arg(ToHexString(arg.constant));
+                if(DbgMemIsValidReadPtr(arg.constant))
+                    addFollowMenuItem(menu, tr("&Constant: ") + constant, arg.constant);
+            }
+            if(DbgMemIsValidReadPtr(arg.memvalue))
+                addFollowMenuItem(menu, tr("&Value: ") + segment + "[" + QString(arg.mnemonic) + "]", arg.memvalue);
         }
         else
         {
             if(DbgMemIsValidReadPtr(arg.value))
                 addFollowMenuItem(menu, QString(arg.mnemonic).toUpper().trimmed(), arg.value);
+        }
+    }
+}
+
+/**
+ * @brief CPUInfoBox::addFollowMenuItem Add a follow action to the menu
+ * @param menu The menu to which the follow action adds
+ * @param name The user-friendly name of the action
+ * @param value The VA of the address
+ */
+void CPUInfoBox::addWatchMenuItem(QMenu* menu, QString name, duint value)
+{
+    foreach(QAction* action, menu->actions()) //check for duplicate action
+        if(action->text() == name)
+            return;
+    QAction* newAction = new QAction(name, menu);
+    menu->addAction(newAction);
+    newAction->setObjectName(QString("WATCH|") + ToPtrString(value));
+    connect(newAction, SIGNAL(triggered()), this, SLOT(followActionSlot()));
+}
+
+/**
+ * @brief CPUInfoBox::setupFollowMenu Set up a follow menu.
+ * @param menu The menu to create
+ * @param wVA The selected VA
+ */
+void CPUInfoBox::setupWatchMenu(QMenu* menu, duint wVA)
+{
+    menu->setIcon(DIcon("animal-dog.png"));
+    //most basic follow action
+    addWatchMenuItem(menu, tr("&Selected Address"), wVA);
+
+    //add follow actions
+    DISASM_INSTR instr;
+    DbgDisasmAt(wVA, &instr);
+
+    for(int i = 0; i < instr.argcount; i++)
+    {
+        const DISASM_ARG arg = instr.arg[i];
+        if(arg.type == arg_memory)
+        {
+            QString segment = "";
+#ifdef _WIN64
+            if(arg.segment == SEG_GS)
+                segment = "gs:";
+#else //x32
+            if(arg.segment == SEG_FS)
+                segment = "fs:";
+#endif //_WIN64
+            if(DbgMemIsValidReadPtr(arg.value))
+                addWatchMenuItem(menu, tr("&Address: ") + segment + QString(arg.mnemonic).toUpper().trimmed(), arg.value);
+            if(arg.value != arg.constant)
+            {
+                QString constant = QString("%1").arg(ToHexString(arg.constant));
+                if(DbgMemIsValidReadPtr(arg.constant))
+                    addWatchMenuItem(menu, tr("&Constant: ") + constant, arg.constant);
+            }
+            if(DbgMemIsValidReadPtr(arg.memvalue))
+                addWatchMenuItem(menu, tr("&Value: ") + segment + "[" + QString(arg.mnemonic) + "]", arg.memvalue);
+        }
+        else
+        {
+            if(DbgMemIsValidReadPtr(arg.value))
+                addWatchMenuItem(menu, QString(arg.mnemonic).toUpper().trimmed(), arg.value);
         }
     }
 }
@@ -338,11 +642,20 @@ int CPUInfoBox::followInDump(dsint wVA)
 
 void CPUInfoBox::contextMenuSlot(QPoint pos)
 {
-    QMenu* wMenu = new QMenu(this); //create context menu
-    QMenu* wFollowMenu = new QMenu("&Follow in Dump", this);
-    setupFollowMenu(wFollowMenu, curAddr);
-    wMenu->addMenu(wFollowMenu);
-    QMenu wCopyMenu("&Copy", this);
+    QMenu wMenu(this); //create context menu
+    QMenu wFollowMenu(tr("&Follow in Dump"), this);
+    setupFollowMenu(&wFollowMenu, curAddr);
+    wMenu.addMenu(&wFollowMenu);
+    QMenu wModifyValueMenu(tr("&Modify Value"), this);
+    setupModifyValueMenu(&wModifyValueMenu, curAddr);
+    if(!wModifyValueMenu.isEmpty())
+        wMenu.addMenu(&wModifyValueMenu);
+    QMenu wWatchMenu(tr("&Watch"), this);
+    setupWatchMenu(&wWatchMenu, curAddr);
+    wMenu.addMenu(&wWatchMenu);
+    if(!getInfoLine(2).isEmpty())
+        wMenu.addAction(makeAction(DIcon("xrefs.png"), tr("&Show References"), SLOT(findXReferencesSlot())));
+    QMenu wCopyMenu(tr("&Copy"), this);
     setupCopyMenu(&wCopyMenu);
     if(DbgIsDebugging())
     {
@@ -354,10 +667,10 @@ void CPUInfoBox::contextMenuSlot(QPoint pos)
     }
     if(wCopyMenu.actions().length())
     {
-        wMenu->addSeparator();
-        wMenu->addMenu(&wCopyMenu);
+        wMenu.addSeparator();
+        wMenu.addMenu(&wCopyMenu);
     }
-    wMenu->exec(mapToGlobal(pos)); //execute context menu
+    wMenu.exec(mapToGlobal(pos)); //execute context menu
 }
 
 void CPUInfoBox::copyAddress()
@@ -378,4 +691,10 @@ void CPUInfoBox::copyOffset()
 void CPUInfoBox::doubleClickedSlot()
 {
     followInDump(curAddr);
+}
+
+void CPUInfoBox::setupShortcuts()
+{
+    mCopyLineAction->setShortcut(ConfigShortcut("ActionCopyLine"));
+    addAction(mCopyLineAction);
 }

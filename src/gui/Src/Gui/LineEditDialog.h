@@ -18,11 +18,15 @@ public:
     QString editText;
     bool bChecked;
     void setText(const QString & text);
+    void setPlaceholderText(const QString & text);
+    void setTextMaxLength(int length);
     void enableCheckBox(bool bEnable);
     void setCheckBox(bool bSet);
     void setCheckBoxText(const QString & text);
     void setCursorPosition(int position);
     void ForceSize(unsigned int size);
+    void setFpuMode();
+    void selectAllText();
 
 private slots:
     void on_textEdit_textChanged(const QString & arg1);
@@ -31,6 +35,7 @@ private slots:
 private:
     Ui::LineEditDialog* ui;
     unsigned int fixed_size;
+    bool fpuMode;
 };
 
 #endif // LINEEDITDIALOG_H

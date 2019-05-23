@@ -2,7 +2,10 @@
 #define ATTACHDIALOG_H
 
 #include <QDialog>
-#include "SearchListView.h"
+
+class StdSearchListView;
+class QMenu;
+class QAction;
 
 namespace Ui
 {
@@ -19,14 +22,13 @@ public:
 
 private slots:
     void on_btnAttach_clicked();
+    void on_btnFindWindow_clicked();
     void refresh();
     void processListContextMenu(QMenu* wMenu);
 
 private:
     Ui::AttachDialog* ui;
-
-    SearchListView* mSearchListView;
-
+    StdSearchListView* mSearchListView;
     QAction* mAttachAction;
     QAction* mRefreshAction;
 };

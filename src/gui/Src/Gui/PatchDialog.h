@@ -58,6 +58,13 @@ private:
     bool hasNextGroup(const PatchInfoList & patchList, int group);
     dsint getGroupAddress(const PatchInfoList & patchList, int group);
 
+    void saveAs1337(const QString & filename);
+    //void saveAsC(const QString & filename);
+
+    bool containsRelocatedBytes();
+    bool containsRelocatedBytes(const PatchInfoList & patchList);
+    bool showRelocatedBytesWarning();
+
 private slots:
     void dbgStateChanged(DBGSTATE state);
     void updatePatches();

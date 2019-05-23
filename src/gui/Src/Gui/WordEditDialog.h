@@ -1,10 +1,12 @@
 #ifndef WORDEDITDIALOG_H
 #define WORDEDITDIALOG_H
 
+#include <QValidator>
 #include <QDialog>
 #include <QPushButton>
-#include "ValidateExpressionThread.h"
 #include "Imports.h"
+
+class ValidateExpressionThread;
 
 namespace Ui
 {
@@ -41,6 +43,7 @@ private:
     int mHexLineEditPos;
     int mSignedEditPos;
     int mUnsignedEditPos;
+    int mAsciiLineEditPos;
 };
 
 #endif // WORDEDITDIALOG_H

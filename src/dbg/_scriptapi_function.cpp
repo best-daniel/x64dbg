@@ -7,7 +7,7 @@ SCRIPT_EXPORT bool Script::Function::Add(duint start, duint end, bool manual, du
     return FunctionAdd(start, end, manual, instructionCount);
 }
 
-bool Script::Function::Add(const FunctionInfo* info)
+SCRIPT_EXPORT bool Script::Function::Add(const FunctionInfo* info)
 {
     if(!info)
         return false;
@@ -25,11 +25,11 @@ SCRIPT_EXPORT bool Script::Function::Get(duint addr, duint* start, duint* end, d
 SCRIPT_EXPORT bool Script::Function::GetInfo(duint addr, FunctionInfo* info)
 {
     FUNCTIONSINFO function;
-    if(!FunctionGetInfo(addr, &function))
+    if(!FunctionGetInfo(addr, function))
         return false;
     if(info)
     {
-        strcpy_s(info->mod, function.mod);
+        strcpy_s(info->mod, function.mod().c_str());
         info->rvaStart = function.start;
         info->rvaEnd = function.end;
         info->manual = function.manual;
@@ -48,9 +48,14 @@ SCRIPT_EXPORT bool Script::Function::Delete(duint address)
     return FunctionDelete(address);
 }
 
+SCRIPT_EXPORT void Script::Function::DeleteRange(duint start, duint end, bool deleteManual)
+{
+    FunctionDelRange(start, end, deleteManual);
+}
+
 SCRIPT_EXPORT void Script::Function::DeleteRange(duint start, duint end)
 {
-    FunctionDelRange(start, end);
+    DeleteRange(start, end, false);
 }
 
 SCRIPT_EXPORT void Script::Function::Clear()
@@ -67,7 +72,7 @@ SCRIPT_EXPORT bool Script::Function::GetList(ListOf(FunctionInfo) list)
     for(const auto & function : functionList)
     {
         FunctionInfo scriptFunction;
-        strcpy_s(scriptFunction.mod, function.mod);
+        strcpy_s(scriptFunction.mod, function.mod().c_str());
         scriptFunction.rvaStart = function.start;
         scriptFunction.rvaEnd = function.end;
         scriptFunction.manual = function.manual;
