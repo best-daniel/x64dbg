@@ -1,12 +1,12 @@
-#ifndef ZYDISTOKENIZER_H
-#define ZYDISTOKENIZER_H
+#pragma once
 
 #include <zydis_wrapper.h>
-#include "RichTextPainter.h"
-#include "Configuration.h"
+#include <Utils/RichTextPainter.h>
+#include <Configuration.h>
 #include <map>
 #include <QHash>
 #include <QtCore>
+#include "Architecture.h"
 
 class ZydisTokenizer
 {
@@ -35,6 +35,7 @@ public:
         //values
         Address, //jump/call destinations or displacements inside memory
         Value,
+        TraceNewValue,
         //memory
         MemorySize,
         MemorySegment,
@@ -110,12 +111,14 @@ public:
     struct InstructionToken
     {
         std::vector<SingleToken> tokens; //list of tokens that form the instruction
-        int x; //x of the first character
+        int x = 0; //x of the first character
 
-        InstructionToken()
+        QString toString() const
         {
-            tokens.clear();
-            x = 0;
+            QString text;
+            for(const auto & token : tokens)
+                text += token.text;
+            return text;
         }
     };
 
@@ -153,11 +156,12 @@ public:
         }
     };
 
-    ZydisTokenizer(int maxModuleLength);
+    ZydisTokenizer(int maxModuleLength, Architecture* architecture);
     bool Tokenize(duint addr, const unsigned char* data, int datasize, InstructionToken & instruction);
     bool TokenizeData(const QString & datatype, const QString & data, InstructionToken & instruction);
     void UpdateConfig();
-    void SetConfig(bool bUppercase, bool bTabbedMnemonic, bool bArgumentSpaces, bool bHidePointerSizes, bool bHideNormalSegments, bool bMemorySpaces, bool bNoHighlightOperands, bool bNoCurrentModuleText, bool b0xPrefixValues);
+    void UpdateArchitecture();
+    void SetConfig(bool bUppercase, bool bTabbedMnemonic, bool bArgumentSpaces, bool bHidePointerSizes, bool bHideNormalSegments, bool bMemorySpaces, bool bNoHighlightOperands, bool bNoCurrentModuleText, DisasmValueNotationType ValueNotation);
     int Size() const;
     const Zydis & GetZydis() const;
 
@@ -170,31 +174,37 @@ public:
     static void addColorName(TokenType type, QString color, QString backgroundColor);
     static void addStringsToPool(const QString & regs);
     static bool tokenTextPoolEquals(const QString & a, const QString & b);
+    static TokenColor getTokenColor(TokenType type);
+
+    static void TokenizeTraceRegister(const char* reg, duint oldValue, duint newValue, std::vector<SingleToken> & tokens);
+    static void TokenizeTraceMemory(duint address, duint oldValue, duint newValue, std::vector<SingleToken> & tokens);
+
 
 private:
-    Zydis _cp;
-    bool isNop;
-    InstructionToken _inst;
-    bool _success;
-    int _maxModuleLength;
-    bool _bUppercase;
-    bool _bTabbedMnemonic;
-    bool _bArgumentSpaces;
-    bool _bHidePointerSizes;
-    bool _bHideNormalSegments;
-    bool _bMemorySpaces;
-    bool _bNoHighlightOperands;
-    bool _bNoCurrentModuleText;
-    bool _b0xPrefixValues;
-    TokenType _mnemonicType;
+    Architecture* mArchitecture;
+    Zydis mZydis;
+    bool mSuccess = false;
+    bool mIsNop = false;
+    InstructionToken mInst;
+    TokenType mMnemonicType = TokenType::Uncategorized;
+    int mMaxModuleLength = -1;
+    bool mUppercase = false;
+    bool mTabbedMnemonic = false;
+    bool mArgumentSpaces = false;
+    bool mHidePointerSizes = false;
+    bool mHideNormalSegments = false;
+    bool mMemorySpaces = false;
+    bool mNoHighlightOperands = false;
+    bool mNoCurrentModuleText = false;
+    DisasmValueNotationType mValueNotation = DisasmValueNotationNone;
 
     void addToken(TokenType type, QString text, const TokenValue & value);
     void addToken(TokenType type, const QString & text);
     void addMemoryOperator(char operatorText);
-    QString printValue(const TokenValue & value, bool expandModule, int maxModuleLength) const;
+    QString printValue(const TokenValue & value, bool expandModule) const;
 
-    static QHash<QString, int> stringPoolMap;
-    static int poolId;
+    static QHash<QString, int> gStringPool;
+    static int gPoolId;
 
     bool tokenizePrefix();
     bool tokenizeMnemonic();
@@ -206,5 +216,3 @@ private:
     bool tokenizePtrOperand(const ZydisDecodedOperand & op);
     bool tokenizeInvalidOperand(const ZydisDecodedOperand & op);
 };
-
-#endif // ZYDISTOKENIZER_H

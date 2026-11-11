@@ -1,5 +1,4 @@
-#ifndef LINEEDITDIALOG_H
-#define LINEEDITDIALOG_H
+#pragma once
 
 #include <QDialog>
 
@@ -13,7 +12,7 @@ class LineEditDialog : public QDialog
     Q_OBJECT
 
 public:
-    explicit LineEditDialog(QWidget* parent = 0);
+    explicit LineEditDialog(QWidget* parent = nullptr);
     ~LineEditDialog();
     QString editText;
     bool bChecked;
@@ -29,13 +28,13 @@ public:
     void selectAllText();
 
 private slots:
-    void on_textEdit_textChanged(const QString & arg1);
+    void on_textEdit_textEdited(const QString & arg1);
     void on_checkBox_toggled(bool checked);
+    void on_buttonOk_clicked();
+    void on_buttonCancel_clicked();
 
 private:
     Ui::LineEditDialog* ui;
     unsigned int fixed_size;
     bool fpuMode;
 };
-
-#endif // LINEEDITDIALOG_H

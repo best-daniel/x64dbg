@@ -1,9 +1,13 @@
 #include <windows.h>
+#pragma warning(push)
+#pragma warning(disable:4091)
 #include <dbghelp.h>
+#pragma warning(pop)
 #include <stdio.h>
 #include <exception>
 #include <signal.h>
 #include "crashdump.h"
+#include "signaturecheck.h"
 
 #define PROCESS_CALLBACK_FILTER_ENABLED 0x1
 
@@ -33,18 +37,22 @@ BOOL
 
 void CrashDumpInitialize()
 {
+    // The error mode is inherited from the parent process. Shells like cygwin
+    // (git bash) and node.js set SEM_NOGPFAULTERRORBOX, which makes unhandled
+    // exceptions terminate the process silently, without WER involvement (no
+    // crash dump, no JIT debugger). Reset it so crashes are always reported.
+    // SEM_FAILCRITICALERRORS is kept to avoid legacy hard error popups.
+    SetErrorMode(SEM_FAILCRITICALERRORS);
+
     // Get handles to kernel32 and dbghelp
-    HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
-    HMODULE hDbghelp = LoadLibraryA("dbghelp.dll");
+    HMODULE hDbghelp = LoadLibraryCheckedW(L"dbghelp.dll", false);
 
     if(hDbghelp)
         *(FARPROC*)&MiniDumpWriteDumpPtr = GetProcAddress(hDbghelp, "MiniDumpWriteDump");
 
-    if(hKernel32)
-    {
-        *(FARPROC*)&SetProcessUserModeExceptionPolicyPtr = GetProcAddress(hKernel32, "SetProcessUserModeExceptionPolicy");
-        *(FARPROC*)&GetProcessUserModeExceptionPolicyPtr = GetProcAddress(hKernel32, "GetProcessUserModeExceptionPolicy");
-    }
+    HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
+    *(FARPROC*)&SetProcessUserModeExceptionPolicyPtr = GetProcAddress(hKernel32, "SetProcessUserModeExceptionPolicy");
+    *(FARPROC*)&GetProcessUserModeExceptionPolicyPtr = GetProcAddress(hKernel32, "GetProcessUserModeExceptionPolicy");
 
     if(MiniDumpWriteDumpPtr)
         SetUnhandledExceptionFilter(CrashDumpExceptionHandler);
@@ -68,7 +76,7 @@ void CrashDumpInitialize()
     {
         _set_purecall_handler(TerminateHandler);                // https://msdn.microsoft.com/en-us/library/t296ys27.aspx
         _set_invalid_parameter_handler(InvalidParameterHandler);// https://msdn.microsoft.com/en-us/library/a9yf33zb.aspx
-        set_terminate(TerminateHandler);                        // http://en.cppreference.com/w/cpp/error/set_terminate
+        std::set_terminate(TerminateHandler);                   // http://en.cppreference.com/w/cpp/error/set_terminate
         signal(SIGABRT, AbortHandler);                          // https://msdn.microsoft.com/en-us/library/xdkz3x12.aspx
     }
 }

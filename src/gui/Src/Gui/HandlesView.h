@@ -1,5 +1,4 @@
-#ifndef HANDLESVIEW_H
-#define HANDLESVIEW_H
+#pragma once
 
 #include <QWidget>
 #include "Imports.h"
@@ -9,6 +8,7 @@ class ReferenceView;
 class QVBoxLayout;
 class LabeledSplitter;
 class StdSearchListView;
+class StdIconSearchListView;
 class QMenu;
 
 class HandlesView : public QWidget
@@ -22,8 +22,8 @@ public slots:
     void refreshShortcuts();
     void dbgStateChanged(DBGSTATE state);
 
-    void handlesTableContextMenuSlot(QMenu* wMenu);
-    void tcpConnectionsTableContextMenuSlot(QMenu* wMenu);
+    void handlesTableContextMenuSlot(QMenu* menu);
+    void tcpConnectionsTableContextMenuSlot(QMenu* menu);
     void windowsTableContextMenuSlot(QMenu*);
     void privilegesTableContextMenuSlot(const QPoint & pos);
 
@@ -34,7 +34,9 @@ public slots:
     void enableAllPrivilegesSlot();
     void enableWindowSlot();
     void disableWindowSlot();
+    void focusWindowSlot();
     void followInDisasmSlot();
+    void followInThreads();
     void toggleBPSlot();
     void messagesBPSlot();
 
@@ -43,7 +45,7 @@ private:
     LabeledSplitter* mSplitter;
     StdSearchListView* mHandlesTable;
     StdSearchListView* mTcpConnectionsTable;
-    StdSearchListView* mWindowsTable;
+    StdIconSearchListView* mWindowsTable;
     //ReferenceView* mHeapsTable;
     StdTable* mPrivilegesTable;
 
@@ -55,7 +57,9 @@ private:
     QAction* mActionEnableAllPrivileges;
     QAction* mActionEnableWindow;
     QAction* mActionDisableWindow;
+    QAction* mActionFocusWindow;
     QAction* mActionFollowProc;
+    QAction* mActionFollowThread;
     QAction* mActionToggleProcBP;
     QAction* mActionMessageProcBP;
 
@@ -64,8 +68,4 @@ private:
     void enumTcpConnections();
     //void enumHeaps();
     void enumPrivileges();
-
-    void AppendPrivilege(int row, const char* PrivilegeString);
 };
-
-#endif // HANDLESVIEW_H

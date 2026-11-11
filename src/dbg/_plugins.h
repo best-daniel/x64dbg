@@ -28,6 +28,24 @@
 #define PLUG_DB_LOADSAVE_DATA 1
 #define PLUG_DB_LOADSAVE_ALL 2
 
+#if defined(__cplusplus)
+#define ENUM_U8_BEGIN(name) typedef enum : uint8_t
+#define ENUM_U8_END(name) name
+#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 202311L
+#define ENUM_U8_BEGIN(name) typedef enum : uint8_t
+#define ENUM_U8_END(name) name
+#elif defined(_MSC_VER)
+// MSVC does not support fixed underlying enum types in C mode. Keep the
+// constants in an anonymous enum and use an explicitly sized typedef.
+#define ENUM_U8_BEGIN(name) typedef uint8_t name; enum
+#define ENUM_U8_END(name)
+#elif defined(__GNUC__) || defined(__clang__)
+#define ENUM_U8_BEGIN(name) typedef enum __attribute__((packed))
+#define ENUM_U8_END(name) name
+#else
+#error "Unsupported compiler"
+#endif
+
 //structures
 typedef struct
 {
@@ -47,6 +65,9 @@ typedef struct
     int hMenuDisasm; //plugin disasm menu handle
     int hMenuDump; //plugin dump menu handle
     int hMenuStack; //plugin stack menu handle
+    int hMenuGraph; //plugin graph menu handle
+    int hMenuMemmap; //plugin memory map menu handle
+    int hMenuSymmod; //plugin symbol module menu handle
 } PLUG_SETUPSTRUCT;
 
 typedef struct
@@ -64,6 +85,11 @@ typedef struct
 {
     void* reserved;
 } PLUG_CB_STOPDEBUG;
+
+typedef struct
+{
+    void* reserved;
+} PLUG_CB_STOPPINGDEBUG;
 
 typedef struct
 {
@@ -225,8 +251,136 @@ typedef struct
 
 typedef struct
 {
-    int hMenu;
+    GUIMENUTYPE hMenu;
 } PLUG_CB_MENUPREPARE;
+
+typedef struct
+{
+    const char* traceFilePath;
+} PLUG_CB_STARTTRACE;
+
+typedef struct
+{
+    void* reserved;
+} PLUG_CB_STOPTRACE;
+
+ENUM_U8_BEGIN(DbItemType)
+{
+    DbItemTypeBookmark,
+    DbItemTypeLabel,
+    DbItemTypeComment,
+    DbItemTypeFunction,
+    DbItemTypeLoop,
+    DbItemTypeArgument,
+    DbItemTypeAddressColor,
+}
+ENUM_U8_END(DbItemType);
+
+ENUM_U8_BEGIN(DbOperationType)
+{
+    DbOperationTypeAdd,
+    DbOperationTypeRemove,
+}
+ENUM_U8_END(DbOperationType);
+
+#undef ENUM_U8_BEGIN
+#undef ENUM_U8_END
+
+typedef struct
+{
+    uint8_t reserved;
+} DbItemBookmark;
+
+typedef struct
+{
+    const char* text;
+} DbItemLabel;
+
+typedef struct
+{
+    const char* text;
+} DbItemComment;
+
+typedef struct
+{
+    duint end;
+    duint parent;
+    uint32_t icount;
+} DbItemFunction;
+
+typedef struct
+{
+    duint end;
+    duint parent;
+    uint32_t icount;
+    int32_t depth;
+} DbItemLoop;
+
+typedef struct
+{
+    duint end;
+    uint32_t icount;
+} DbItemArgument;
+
+typedef struct
+{
+    duint end;
+    duint color;
+} DbItemAddressColor;
+
+typedef struct
+{
+    DbOperationType opType;
+    DbItemType itemType;
+    bool manual;
+    duint modhash; // Use DbgFunctions()->ModNameFromHash
+    duint address; // RVA if modhash != 0 else VA
+    union
+    {
+        DbItemBookmark bookmark;
+        DbItemLabel label;
+        DbItemComment comment;
+        DbItemFunction function;
+        DbItemLoop loop;
+        DbItemArgument argument;
+        DbItemAddressColor addressColor;
+    };
+} DbOperation;
+
+#ifdef __cplusplus
+static_assert(offsetof(DbOperation, modhash) == sizeof(void*), "");
+#endif // __cplusplus
+
+typedef struct
+{
+    const DbOperation** operations;
+    size_t count;
+    uint32_t batchId; // >0 if batched, 0 otherwise
+} PLUG_CB_DBOPERATION;
+
+typedef enum
+{
+    ValueTypeNumber,
+    ValueTypeString,
+    // Types below cannot be used for values, only for registration
+    ValueTypeAny,
+    ValueTypeOptionalNumber,
+    ValueTypeOptionalString,
+    ValueTypeOptionalAny,
+} ValueType;
+
+typedef struct
+{
+    const char* ptr; // Should be allocated with BridgeAlloc
+    bool isOwner; // When set to true BridgeFree will be called on ptr
+} StringValue;
+
+typedef struct
+{
+    ValueType type;
+    duint number;
+    StringValue string;
+} ExpressionValue;
 
 //enums
 typedef enum
@@ -262,6 +416,11 @@ typedef enum
     CB_VALFROMSTRING, //PLUG_CB_VALFROMSTRING
     CB_VALTOSTRING, //PLUG_CB_VALTOSTRING
     CB_MENUPREPARE, //PLUG_CB_MENUPREPARE
+    CB_STOPPINGDEBUG, //PLUG_CB_STOPDEBUG
+    CB_STARTTRACE, //PLUG_CB_STARTTRACE
+    CB_STOPTRACE, //PLUG_CB_STOPTRACE
+    CB_DBOPERATION, //PLUG_CB_DBOPERATION
+    CB_DBLOADOPERATION, //PLUG_CB_DBOPERATION
     CB_LAST
 } CBTYPE;
 
@@ -277,7 +436,8 @@ typedef enum
 typedef void (*CBPLUGIN)(CBTYPE cbType, void* callbackInfo);
 typedef bool (*CBPLUGINCOMMAND)(int argc, char** argv);
 typedef void (*CBPLUGINSCRIPT)();
-typedef duint(*CBPLUGINEXPRFUNCTION)(int argc, duint* argv, void* userdata);
+typedef duint(*CBPLUGINEXPRFUNCTION)(int argc, const duint* argv, void* userdata);
+typedef bool(*CBPLUGINEXPRFUNCTIONEX)(ExpressionValue* result, int argc, const ExpressionValue* argv, void* userdata);
 typedef FORMATRESULT(*CBPLUGINFORMATFUNCTION)(char* dest, size_t destCount, int argc, char* argv[], duint value, void* userdata);
 typedef bool (*CBPLUGINPREDICATE)(void* userdata);
 
@@ -292,6 +452,7 @@ PLUG_IMPEXP bool _plugin_unregistercallback(int pluginHandle, CBTYPE cbType);
 PLUG_IMPEXP bool _plugin_registercommand(int pluginHandle, const char* command, CBPLUGINCOMMAND cbCommand, bool debugonly);
 PLUG_IMPEXP bool _plugin_unregistercommand(int pluginHandle, const char* command);
 PLUG_IMPEXP void _plugin_logprintf(const char* format, ...);
+PLUG_IMPEXP void _plugin_lograw_html(const char* text);
 PLUG_IMPEXP void _plugin_logputs(const char* text);
 PLUG_IMPEXP void _plugin_logprint(const char* text);
 PLUG_IMPEXP void _plugin_debugpause();
@@ -313,12 +474,14 @@ PLUG_IMPEXP bool _plugin_menuentryremove(int pluginHandle, int hEntry);
 PLUG_IMPEXP void _plugin_startscript(CBPLUGINSCRIPT cbScript);
 PLUG_IMPEXP bool _plugin_waituntilpaused();
 PLUG_IMPEXP bool _plugin_registerexprfunction(int pluginHandle, const char* name, int argc, CBPLUGINEXPRFUNCTION cbFunction, void* userdata);
+PLUG_IMPEXP bool _plugin_registerexprfunctionex(int pluginHandle, const char* name, ValueType returnType, const ValueType* argTypes, size_t argCount, CBPLUGINEXPRFUNCTIONEX cbFunction, void* userdata);
 PLUG_IMPEXP bool _plugin_unregisterexprfunction(int pluginHandle, const char* name);
 PLUG_IMPEXP bool _plugin_unload(const char* pluginName);
 PLUG_IMPEXP bool _plugin_load(const char* pluginName);
 PLUG_IMPEXP duint _plugin_hash(const void* data, duint size);
 PLUG_IMPEXP bool _plugin_registerformatfunction(int pluginHandle, const char* type, CBPLUGINFORMATFUNCTION cbFunction, void* userdata);
 PLUG_IMPEXP bool _plugin_unregisterformatfunction(int pluginHandle, const char* type);
+PLUG_IMPEXP bool _plugin_testassert(bool condition, const char* format, ...);
 
 #ifdef __cplusplus
 }

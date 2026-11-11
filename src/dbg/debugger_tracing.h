@@ -12,13 +12,17 @@ struct TraceCondition
     explicit TraceCondition(const String & expression, duint maxCount)
         : condition(expression), steps(0), maxSteps(maxCount) {}
 
-    bool BreakTrace()
+    // Return value: 0:Continue, 1:Break, -1:Error (Break)
+    char BreakTrace()
     {
         steps++;
         if(steps >= maxSteps)
-            return true;
+            return 1;
         duint value;
-        return !condition.Calculate(value, valuesignedcalc(), true) || value;
+        if(condition.Calculate(value, valuesignedcalc(), true))
+            return value != 0;
+        else
+            return -1;
     }
 };
 
@@ -30,12 +34,12 @@ struct TextCondition
     explicit TextCondition(const String & expression, const String & text)
         : condition(expression), text(text) {}
 
-    bool Evaluate(bool defaultValue) const
+    char Evaluate() const
     {
         duint value;
         if(condition.Calculate(value, valuesignedcalc(), true))
             return !!value;
-        return defaultValue;
+        return -1;
     }
 };
 
@@ -45,7 +49,13 @@ struct TraceState
     {
         delete traceCondition;
         traceCondition = new TraceCondition(expression, maxSteps);
-        return traceCondition->condition.IsValidExpression();
+        bool temp = traceCondition->condition.IsValidExpression();
+        if(!temp)
+        {
+            delete traceCondition;
+            traceCondition = nullptr;
+        }
+        return temp;
     }
 
     bool InitLogFile()
@@ -79,7 +89,7 @@ struct TraceState
             }
         }
         else
-            dprintf_untranslated("%s\n", text.c_str());
+            dputs_untranslated(text.c_str());
     }
 
     bool IsActive() const
@@ -92,9 +102,9 @@ struct TraceState
         return logCondition || cmdCondition;
     }
 
-    bool BreakTrace() const
+    char BreakTrace() const
     {
-        return !traceCondition || traceCondition->BreakTrace();
+        return traceCondition ? traceCondition->BreakTrace() : 1;
     }
 
     duint StepCount() const
@@ -108,13 +118,16 @@ struct TraceState
         logCondition = nullptr;
         if(text.empty())
             return true;
-        logCondition = new TextCondition(expression, text);
+        if(expression.empty())
+            logCondition = new TextCondition("1", text);
+        else
+            logCondition = new TextCondition(expression, text);
         return logCondition->condition.IsValidExpression();
     }
 
-    bool EvaluateLog(bool defaultValue) const
+    char EvaluateLog() const
     {
-        return logCondition && logCondition->Evaluate(defaultValue);
+        return logCondition ? logCondition->Evaluate() : 0;
     }
 
     const String & LogText() const
@@ -126,35 +139,27 @@ struct TraceState
     {
         delete cmdCondition;
         cmdCondition = nullptr;
+        // An empty expression means the command condition defaults to the break
+        // condition. The trace condition is not initialized yet at this point
+        // (TraceSetCommand executes before the trace is started), so the break
+        // condition evaluated during the trace is used in EvaluateCmd instead.
+        cmdConditionDefault = expression.empty();
         if(text.empty())
             return true;
-        cmdCondition = new TextCondition(expression, text);
+        cmdCondition = new TextCondition(cmdConditionDefault ? "1" : expression, text);
         return cmdCondition->condition.IsValidExpression();
     }
 
-    bool EvaluateCmd(bool defaultValue) const
+    char EvaluateCmd(char defaultValue) const
     {
-        return cmdCondition && cmdCondition->Evaluate(defaultValue);
+        if(cmdCondition == nullptr || cmdConditionDefault)
+            return defaultValue;
+        return cmdCondition->Evaluate();
     }
 
     const String & CmdText() const
     {
         return cmdCondition ? cmdCondition->text : emptyString;
-    }
-
-    bool InitSwitchCondition(const String & expression)
-    {
-        delete switchCondition;
-        switchCondition = nullptr;
-        if(expression.empty())
-            return true;
-        switchCondition = new TextCondition(expression, "");
-        return switchCondition->condition.IsValidExpression();
-    }
-
-    bool EvaluateSwitch(bool defaultValue) const
-    {
-        return switchCondition && switchCondition->Evaluate(defaultValue);
     }
 
     void SetLogFile(const char* fileName)
@@ -172,6 +177,16 @@ struct TraceState
         forceBreakTrace = true;
     }
 
+    void SetPartyFilter(int party)
+    {
+        partyFilter = party;
+    }
+
+    int GetPartyFilter() const
+    {
+        return partyFilter;
+    }
+
     void Clear()
     {
         delete traceCondition;
@@ -180,23 +195,24 @@ struct TraceState
         logCondition = nullptr;
         delete cmdCondition;
         cmdCondition = nullptr;
-        delete switchCondition;
-        switchCondition = nullptr;
+        cmdConditionDefault = false;
         logFile.clear();
         delete logWriter;
         logWriter = nullptr;
         writeUtf16 = false;
         forceBreakTrace = false;
+        partyFilter = -1;
     }
 
 private:
     TraceCondition* traceCondition = nullptr;
     TextCondition* logCondition = nullptr;
     TextCondition* cmdCondition = nullptr;
-    TextCondition* switchCondition = nullptr;
+    bool cmdConditionDefault = false;
     String emptyString;
     WString logFile;
     BufferedWriter* logWriter = nullptr;
     bool writeUtf16 = false;
     bool forceBreakTrace = false;
+    int partyFilter = -1;  // -1 = none, mod_user = 0, mod_system = 1
 };

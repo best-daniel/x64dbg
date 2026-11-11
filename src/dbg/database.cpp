@@ -26,6 +26,7 @@
 #include "filemap.h"
 #include "debugger.h"
 #include "stringformat.h"
+#include "addresscolor.h"
 
 /**
 \brief Directory where program databases are stored (usually in \db). UTF-8 encoding.
@@ -61,6 +62,7 @@ void DbSave(DbLoadSaveType saveType, const char* dbfile, bool disablecompression
 
     if(saveType == DbLoadSaveType::DebugData || saveType == DbLoadSaveType::All)
     {
+        AddressColorCacheSave(root);
         CommentCacheSave(root);
         LabelCacheSave(root);
         BookmarkCacheSave(root);
@@ -71,6 +73,7 @@ void DbSave(DbLoadSaveType saveType, const char* dbfile, bool disablecompression
         EncodeMapCacheSave(root);
         TraceRecord.saveToDb(root);
         BpCacheSave(root);
+        ModCacheSave(root);
         WatchCacheSave(root);
 
         //save notes
@@ -91,7 +94,7 @@ void DbSave(DbLoadSaveType saveType, const char* dbfile, bool disablecompression
 
         //plugin data
         PLUG_CB_LOADSAVEDB pluginSaveDb;
-        // Some plugins may wish to change this value so that all plugins after his or her plugin will save data into plugin-supplied storage instead of the system's.
+        // Some plugins may wish to change this value so that all plugins after their plugin will save data into plugin-supplied storage instead of the system's.
         // We back up this value so that the debugger is not fooled by such plugins.
         JSON pluginRoot = json_object();
         pluginSaveDb.root = pluginRoot;
@@ -138,13 +141,13 @@ void DbSave(DbLoadSaveType saveType, const char* dbfile, bool disablecompression
 
         if(!dumpSuccess)
         {
-            String error = stringformatinline(StringUtils::sprintf("{winerror@%d}", GetLastError()));
+            String error = stringformatinline(StringUtils::sprintf("{winerror@%x}", GetLastError()));
             dprintf(QT_TRANSLATE_NOOP("DBG", "\nFailed to write database file !(GetLastError() = %s)\n"), error.c_str());
             json_decref(root);
             return;
         }
 
-        if(!disablecompression && !settingboolget("Engine", "DisableDatabaseCompression"))
+        if(!disablecompression && !settingboolget("Engine", "DisableDatabaseCompression", false))
             LZ4_compress_fileW(wdbpath.c_str(), wdbpath.c_str());
     }
     else //remove database when nothing is in there
@@ -162,6 +165,14 @@ void DbLoad(DbLoadSaveType loadType, const char* dbfile)
     EXCLUSIVE_ACQUIRE(LockDatabase);
 
     auto file = dbfile ? dbfile : dbpath;
+    // If the file is "bak", load from database backup instead
+    if(_stricmp(file, "bak") == 0)
+    {
+        String dbpath_backup(dbpath);
+        dbpath_backup.append(".bak");
+        DbLoad(loadType, dbpath_backup.c_str());
+        return;
+    }
     // If the file doesn't exist, there is no DB to load
     if(!FileExists(file))
         return;
@@ -183,8 +194,36 @@ void DbLoad(DbLoadSaveType loadType, const char* dbfile)
     // Multi-byte (UTF8) file path converted to UTF16
     WString databasePathW = StringUtils::Utf8ToUtf16(file);
 
+    // Check if we should migrate the breakpoints
+    bool migrateBreakpoints = false;
+    {
+        HANDLE hFile = CreateFileW(databasePathW.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, 0);
+        if(hFile != INVALID_HANDLE_VALUE)
+        {
+            FILETIME written;
+            if(GetFileTime(hFile, nullptr, nullptr, &written))
+            {
+                // On 2023-06-10 the default of the command condition was changed
+                SYSTEMTIME smigration = {};
+                smigration.wYear = 2023;
+                smigration.wMonth = 6;
+                smigration.wDay = 10;
+                FILETIME migration = {};
+                if(SystemTimeToFileTime(&smigration, &migration))
+                {
+                    if(CompareFileTime(&written, &migration) < 0)
+                    {
+                        dprintf(QT_TRANSLATE_NOOP("DBG", "(migrating breakpoints) "));
+                        migrateBreakpoints = true;
+                    }
+                }
+            }
+            CloseHandle(hFile);
+        }
+    }
+
     // Decompress the file if compression was enabled
-    bool useCompression = !settingboolget("Engine", "DisableDatabaseCompression");
+    bool useCompression = !settingboolget("Engine", "DisableDatabaseCompression", false);
     LZ4_STATUS lzmaStatus = LZ4_INVALID_ARCHIVE;
     {
         lzmaStatus = LZ4_decompress_fileW(databasePathW.c_str(), databasePathW.c_str());
@@ -201,7 +240,7 @@ void DbLoad(DbLoadSaveType loadType, const char* dbfile)
     FileMap<char> dbMap;
     if(!dbMap.Map(databasePathW.c_str()))
     {
-        String error = stringformatinline(StringUtils::sprintf("{winerror@%d}", GetLastError()));
+        String error = stringformatinline(StringUtils::sprintf("{winerror@%x}", GetLastError()));
         dprintf(QT_TRANSLATE_NOOP("DBG", "\nFailed to read database file !(GetLastError() = %s)\n"), error.c_str());
         return;
     }
@@ -237,6 +276,7 @@ void DbLoad(DbLoadSaveType loadType, const char* dbfile)
             dbhash = 0;
 
         // Finally load all structures
+        AddressColorCacheLoad(root);
         CommentCacheLoad(root);
         LabelCacheLoad(root);
         BookmarkCacheLoad(root);
@@ -246,7 +286,8 @@ void DbLoad(DbLoadSaveType loadType, const char* dbfile)
         XrefCacheLoad(root);
         EncodeMapCacheLoad(root);
         TraceRecord.loadFromDb(root);
-        BpCacheLoad(root);
+        BpCacheLoad(root, migrateBreakpoints);
+        ModCacheLoad(root);
         WatchCacheLoad(root);
 
         // Load notes
@@ -294,17 +335,19 @@ void DbClose()
 
 void DbClear(bool terminating)
 {
-    CommentClear();
-    LabelClear();
-    BookmarkClear();
-    FunctionClear();
-    ArgumentClear();
-    LoopClear();
-    XrefClear();
-    EncodeMapClear();
+    AddressColorClear(terminating);
+    CommentClear(terminating);
+    LabelClear(terminating);
+    BookmarkClear(terminating);
+    FunctionClear(terminating);
+    ArgumentClear(terminating);
+    LoopClear(terminating);
+    XrefClear(terminating);
+    EncodeMapClear(terminating);
     TraceRecord.clear();
-    BpClear();
-    WatchClear();
+    BpClear(terminating);
+    ModCacheClear(terminating);
+    WatchClear(terminating);
     GuiSetDebuggeeNotes("");
 
     if(terminating)
@@ -331,7 +374,7 @@ void DbSetPath(const char* Directory, const char* ModulePath)
         {
             if(GetLastError() != ERROR_ALREADY_EXISTS)
             {
-                String error = stringformatinline(StringUtils::sprintf("{winerror@%d}", GetLastError()));
+                String error = stringformatinline(StringUtils::sprintf("{winerror@%x}", GetLastError()));
                 dprintf(QT_TRANSLATE_NOOP("DBG", "Warning: Failed to create database folder '%s'. GetLastError() = %s\n"), Directory, error.c_str());
             }
         }
@@ -376,7 +419,7 @@ void DbSetPath(const char* Directory, const char* ModulePath)
             auto hFile = CreateFileW(testfile.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
             if(hFile == INVALID_HANDLE_VALUE)
             {
-                String error = stringformatinline(StringUtils::sprintf("{winerror@%d}", GetLastError()));
+                String error = stringformatinline(StringUtils::sprintf("{winerror@%x}", GetLastError()));
                 dprintf(QT_TRANSLATE_NOOP("DBG", "Cannot write to the program directory (GetLastError() = %s), try running x64dbg as admin...\n"), error.c_str());
                 return false;
             }
@@ -385,7 +428,7 @@ void DbSetPath(const char* Directory, const char* ModulePath)
             return true;
         };
 
-        if(settingboolget("Engine", "SaveDatabaseInProgramDirectory") && checkWritable(fileDir))
+        if(settingboolget("Engine", "SaveDatabaseInProgramDirectory", false) && checkWritable(fileDir))
         {
             // Absolute path in the program directory
             sprintf_s(dbpath, "%s\\%s.%s", fileDir, dbName, dbType);

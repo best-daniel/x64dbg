@@ -4,6 +4,7 @@
 @brief Implements the symbolinfo class.
 */
 
+#include "ntdll/ntdll.h"
 #include "symbolinfo.h"
 #include "debugger.h"
 #include "console.h"
@@ -14,92 +15,134 @@
 #include "WinInet-Downloader/downslib.h"
 #include <shlwapi.h>
 
+duint symbolDownloadingBase = 0;
+
 struct SYMBOLCBDATA
 {
     CBSYMBOLENUM cbSymbolEnum;
-    void* user;
-    std::vector<char> decoratedSymbol;
-    std::vector<char> undecoratedSymbol;
+    void* user = nullptr;
 };
 
-/*static void SymEnumImports(duint Base, CBSYMBOLENUM EnumCallback, SYMBOLCBDATA & cbData)
-{
-    SYMBOLINFO symbol;
-    memset(&symbol, 0, sizeof(SYMBOLINFO));
-    symbol.isImported = true;
-    apienumimports(Base, [&](duint base, duint addr, const char* name, const char* moduleName)
-    {
-        cbData.decoratedSymbol[0] = '\0';
-        cbData.undecoratedSymbol[0] = '\0';
-
-        symbol.addr = addr;
-        symbol.decoratedSymbol = cbData.decoratedSymbol.data();
-        symbol.undecoratedSymbol = cbData.undecoratedSymbol.data();
-        strncpy_s(symbol.decoratedSymbol, MAX_SYM_NAME, name, _TRUNCATE);
-
-        // Convert a mangled/decorated C++ name to a readable format
-        if(!SafeUnDecorateSymbolName(name, symbol.undecoratedSymbol, MAX_SYM_NAME, UNDNAME_COMPLETE))
-            symbol.undecoratedSymbol = nullptr;
-        else if(!strcmp(symbol.decoratedSymbol, symbol.undecoratedSymbol))
-            symbol.undecoratedSymbol = nullptr;
-
-        EnumCallback(&symbol, cbData.user);
-    });
-}*/
-
-void SymEnum(duint Base, CBSYMBOLENUM EnumCallback, void* UserData)
+bool SymEnum(duint Base, CBSYMBOLENUM EnumCallback, void* UserData, duint BeginRva, duint EndRva, unsigned int SymbolMask)
 {
     SYMBOLCBDATA cbData;
     cbData.cbSymbolEnum = EnumCallback;
     cbData.user = UserData;
-    cbData.decoratedSymbol.resize(MAX_SYM_NAME + 1);
-    cbData.undecoratedSymbol.resize(MAX_SYM_NAME + 1);
 
+    SHARED_ACQUIRE(LockModules);
+    MODINFO* modInfo = ModInfoFromAddr(Base);
+    if(modInfo == nullptr)
+        return false;
+
+    if(SymbolMask & SYMBOL_MASK_SYMBOL && modInfo->symbols->isOpen())
     {
-        SHARED_ACQUIRE(LockModules);
-        MODINFO* modInfo = ModInfoFromAddr(Base);
-        if(modInfo)
+        modInfo->symbols->enumSymbols([&cbData, Base](const SymbolInfo & info)
         {
-            for(size_t i = 0; i < modInfo->exports.size(); i++)
-            {
-                SYMBOLPTR symbolptr;
-                symbolptr.modbase = Base;
-                symbolptr.symbol = &modInfo->exports.at(i);
-                cbData.cbSymbolEnum(&symbolptr, cbData.user);
-            }
+            SYMBOLPTR symbolptr;
+            symbolptr.modbase = Base;
+            symbolptr.symbol = &info;
+            return cbData.cbSymbolEnum(&symbolptr, cbData.user);
+        }, BeginRva, EndRva);
+    }
 
-            // Emit pseudo entry point symbol
-            {
-                SYMBOLPTR symbolptr;
-                symbolptr.modbase = Base;
-                symbolptr.symbol = &modInfo->entrySymbol;
-                cbData.cbSymbolEnum(&symbolptr, cbData.user);
-            }
+    if(SymbolMask & SYMBOL_MASK_EXPORT)
+    {
+        auto entry = &modInfo->entrySymbol;
 
-            for(size_t i = 0; i < modInfo->imports.size(); i++)
+        // There is a pseudo-export for the entry point function
+        auto emitEntryExport = [&]()
+        {
+            if(modInfo->entry != 0 && entry->rva >= BeginRva && entry->rva <= EndRva)
             {
                 SYMBOLPTR symbolptr;
                 symbolptr.modbase = Base;
-                symbolptr.symbol = &modInfo->imports.at(i);
-                cbData.cbSymbolEnum(&symbolptr, cbData.user);
+                symbolptr.symbol = entry;
+                entry = nullptr;
+                return cbData.cbSymbolEnum(&symbolptr, cbData.user);
             }
-            if(modInfo->symbols->isOpen())
+            entry = nullptr;
+            return true;
+        };
+
+        if(!modInfo->exportsByRva.empty())
+        {
+            auto it = modInfo->exportsByRva.begin();
+            if(BeginRva > modInfo->exports[*it].rva)
             {
-                modInfo->symbols->enumSymbols([&cbData, Base](const SymbolInfo & info)
+                it = std::lower_bound(modInfo->exportsByRva.begin(), modInfo->exportsByRva.end(), BeginRva, [&modInfo](size_t index, duint rva)
                 {
+                    return modInfo->exports[index].rva < rva;
+                });
+            }
+            if(it != modInfo->exportsByRva.end())
+            {
+                for(; it != modInfo->exportsByRva.end(); it++)
+                {
+                    const auto & symbol = modInfo->exports[*it];
+                    if(symbol.rva > EndRva)
+                        break;
+
+                    // This is only executed if there is another export after the entry
+                    if(entry != nullptr && symbol.rva >= entry->rva)
+                    {
+                        if(!emitEntryExport())
+                            return true;
+                    }
+
                     SYMBOLPTR symbolptr;
                     symbolptr.modbase = Base;
-                    symbolptr.symbol = &info;
-                    return cbData.cbSymbolEnum(&symbolptr, cbData.user);
-                });
+                    symbolptr.symbol = &symbol;
+                    if(!cbData.cbSymbolEnum(&symbolptr, cbData.user))
+                        return true;
+                }
+
+                // This is executed if the entry is the last 'export'
+                if(entry != nullptr)
+                {
+                    emitEntryExport();
+                }
+            }
+            else
+            {
+                // This is executed if there are exports, but the range doesn't include any real ones
+                emitEntryExport();
+            }
+        }
+        else
+        {
+            // This is executed if there are no exports
+            emitEntryExport();
+        }
+    }
+
+    if(SymbolMask & SYMBOL_MASK_IMPORT && !modInfo->importsByRva.empty())
+    {
+        auto it = modInfo->importsByRva.begin();
+        if(BeginRva > modInfo->imports[*it].iatRva)
+        {
+            it = std::lower_bound(modInfo->importsByRva.begin(), modInfo->importsByRva.end(), BeginRva, [&modInfo](size_t index, duint rva)
+            {
+                return modInfo->imports[index].iatRva < rva;
+            });
+        }
+        if(it != modInfo->importsByRva.end())
+        {
+            for(; it != modInfo->importsByRva.end(); it++)
+            {
+                const auto & symbol = modInfo->imports[*it];
+                if(symbol.iatRva > EndRva)
+                    break;
+
+                SYMBOLPTR symbolptr;
+                symbolptr.modbase = Base;
+                symbolptr.symbol = &symbol;
+                if(!cbData.cbSymbolEnum(&symbolptr, cbData.user))
+                    return true;
             }
         }
     }
-}
 
-void SymEnumFromCache(duint Base, CBSYMBOLENUM EnumCallback, void* UserData)
-{
-    SymEnum(Base, EnumCallback, UserData);
+    return true;
 }
 
 bool SymGetModuleList(std::vector<SYMBOLMODULEINFO>* List)
@@ -137,9 +180,28 @@ void SymUpdateModuleList()
     GuiSymbolUpdateModuleList((int)moduleCount, data);
 }
 
+static void SymSetProgress(int percentage, const char* pdbBaseFile)
+{
+    if(percentage == 0)
+        GuiAddStatusBarMessage(StringUtils::sprintf("%s\n", pdbBaseFile).c_str());
+    else
+        GuiAddStatusBarMessage(StringUtils::sprintf("%s %d%%\n", pdbBaseFile, percentage).c_str());
+    GuiSymbolSetProgress(percentage);
+}
+
+template<class... Args>
+static void symprintf(const char* format, Args... args)
+{
+    GuiSymbolLogAdd(StringUtils::sprintf(GuiTranslateText(format), args...).c_str());
+}
+
 bool SymDownloadSymbol(duint Base, const char* SymbolStore)
 {
-#define symprintf(format, ...) GuiSymbolLogAdd(StringUtils::sprintf(GuiTranslateText(format), __VA_ARGS__).c_str())
+    struct DownloadBaseGuard
+    {
+        DownloadBaseGuard(duint downloadBase) { symbolDownloadingBase = downloadBase; GuiRepaintTableView(); }
+        ~DownloadBaseGuard() { symbolDownloadingBase = 0; GuiRepaintTableView(); }
+    } g(Base);
 
     // Default to Microsoft's symbol server
     if(!SymbolStore)
@@ -166,22 +228,56 @@ bool SymDownloadSymbol(duint Base, const char* SymbolStore)
     auto pdbBaseFile = found ? found + 1 : pdbFile.c_str();
 
     // TODO: strict checks if this path is absolute
-    WString destinationPath(StringUtils::Utf8ToUtf16(szSymbolCachePath));
-    if(destinationPath.empty())
+    WString symbolPath(StringUtils::Utf8ToUtf16(szSymbolCachePath));
+    if(symbolPath.empty())
     {
-        symprintf(QT_TRANSLATE_NOOP("DBG", "No destination symbol path specified...\n"));
+        symprintf(QT_TRANSLATE_NOOP("DBG", "No symbol path specified...\n"));
         return false;
     }
-    CreateDirectoryW(destinationPath.c_str(), nullptr);
-    if(destinationPath.back() != L'\\')
-        destinationPath += L'\\';
-    destinationPath += StringUtils::Utf8ToUtf16(pdbBaseFile);
-    CreateDirectoryW(destinationPath.c_str(), nullptr);
-    destinationPath += L'\\';
-    destinationPath += StringUtils::Utf8ToUtf16(pdbSignature);
-    CreateDirectoryW(destinationPath.c_str(), nullptr);
-    destinationPath += '\\';
-    destinationPath += StringUtils::Utf8ToUtf16(pdbBaseFile);
+    CreateDirectoryW(symbolPath.c_str(), nullptr);
+    if(symbolPath.back() != L'\\')
+        symbolPath += L'\\';
+    symbolPath += StringUtils::Utf8ToUtf16(pdbBaseFile);
+    CreateDirectoryW(symbolPath.c_str(), nullptr);
+    symbolPath += L'\\';
+    symbolPath += StringUtils::Utf8ToUtf16(pdbSignature);
+    CreateDirectoryW(symbolPath.c_str(), nullptr);
+    symbolPath += '\\';
+    symbolPath += StringUtils::Utf8ToUtf16(pdbBaseFile);
+    auto szSymbolPath = StringUtils::Utf16ToUtf8(symbolPath);
+
+    // Try to load the symbol file directly if it exists locally
+    if(FileExists(szSymbolPath.c_str()))
+    {
+        {
+            EXCLUSIVE_ACQUIRE(LockModules);
+            auto info = ModInfoFromAddr(Base);
+            if(info && info->loadSymbols(szSymbolPath, bForceLoadSymbols))
+                return true;
+        }
+
+        // Load failed. If the file is empty, we just delete it and retry the download. Otherwise, bail
+        auto hFile = CreateFileW(symbolPath.c_str(), FILE_READ_ATTRIBUTES | DELETE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+        bool deleted = false;
+        if(hFile != INVALID_HANDLE_VALUE)
+        {
+            LARGE_INTEGER fileSize;
+            if(GetFileSizeEx(hFile, &fileSize) && fileSize.QuadPart == 0)
+            {
+                IO_STATUS_BLOCK iosb;
+                FILE_DISPOSITION_INFORMATION dispositionInfo;
+                dispositionInfo.DeleteFile = TRUE;
+                deleted = NT_SUCCESS(NtSetInformationFile(hFile, &iosb, &dispositionInfo, sizeof(dispositionInfo), FileDispositionInformation)); // use NT API for XP
+            }
+            CloseHandle(hFile);
+        }
+
+        if(!deleted)
+        {
+            symprintf(QT_TRANSLATE_NOOP("DBG", "Symbol file '%s' exists but could not be loaded!\n"), szSymbolPath.c_str());
+            return false;
+        }
+    }
 
     String symbolUrl(SymbolStore);
     if(symbolUrl.empty())
@@ -193,18 +289,19 @@ bool SymDownloadSymbol(duint Base, const char* SymbolStore)
         symbolUrl += '/';
     symbolUrl += StringUtils::sprintf("%s/%s/%s", pdbBaseFile, pdbSignature.c_str(), pdbBaseFile);
 
-    symprintf(QT_TRANSLATE_NOOP("DBG", "Downloading symbol %s\n  Signature: %s\n  Destination: %s\n  URL: %s\n"), pdbBaseFile, pdbSignature.c_str(), StringUtils::Utf16ToUtf8(destinationPath).c_str(), symbolUrl.c_str());
+    symprintf(QT_TRANSLATE_NOOP("DBG", "Downloading symbol %s\n  Signature: %s\n  Destination: %s\n  URL: %s\n"), pdbBaseFile, pdbSignature.c_str(), StringUtils::Utf16ToUtf8(symbolPath).c_str(), symbolUrl.c_str());
 
-    auto result = downslib_download(symbolUrl.c_str(), destinationPath.c_str(), "x64dbg", 1000, [](unsigned long long read_bytes, unsigned long long total_bytes)
+    DWORD lineDownloadStart = GetTickCount();
+    auto result = downslib_download(symbolUrl.c_str(), symbolPath.c_str(), "x64dbg", 1000, [](void* userdata, unsigned long long read_bytes, unsigned long long total_bytes)
     {
         if(total_bytes)
         {
             auto progress = (double)read_bytes / (double)total_bytes;
-            GuiSymbolSetProgress((int)(progress * 100.0));
+            SymSetProgress((int)(progress * 100.0), (const char*)userdata);
         }
         return true;
-    });
-    GuiSymbolSetProgress(0);
+    }, (void*)pdbBaseFile);
+    SymSetProgress(0, pdbBaseFile);
 
     switch(result)
     {
@@ -233,6 +330,10 @@ bool SymDownloadSymbol(duint Base, const char* SymbolStore)
         __debugbreak();
     }
 
+    DWORD ms = GetTickCount() - lineDownloadStart;
+    double secs = (double)ms / 1000.0;
+    symprintf(QT_TRANSLATE_NOOP("DBG", "Finished downloading symbol %s in %.03fs\n"), pdbBaseFile, secs);
+
     {
         EXCLUSIVE_ACQUIRE(LockModules);
         auto info = ModInfoFromAddr(Base);
@@ -243,20 +344,8 @@ bool SymDownloadSymbol(duint Base, const char* SymbolStore)
             return false;
         }
 
-        // insert the downloaded symbol path in the beginning of the PDB load order
-        auto destPathUtf8 = StringUtils::Utf16ToUtf8(destinationPath);
-        for(auto it = info->pdbPaths.begin(); it != info->pdbPaths.end(); ++it)
-        {
-            if(*it == destPathUtf8)
-            {
-                info->pdbPaths.erase(it);
-                break;
-            }
-        }
-        info->pdbPaths.insert(info->pdbPaths.begin(), destPathUtf8);
-
         // trigger a symbol load
-        info->loadSymbols();
+        info->loadSymbols(szSymbolPath, bForceLoadSymbols);
     }
 
     return true;
@@ -332,7 +421,7 @@ bool SymAddrFromName(const char* Name, duint* Address)
     return false;
 }
 
-String SymGetSymbolicName(duint Address)
+String SymGetSymbolicName(duint Address, bool IncludeAddress)
 {
     //
     // This resolves an address to a module and symbol:
@@ -348,15 +437,152 @@ String SymGetSymbolicName(duint Address)
     {
         if(hasModule)
             return StringUtils::sprintf("%s.%p", modname, Address);
-        return "";
+        else if(IncludeAddress)
+            return StringUtils::sprintf("%p", Address);
+        else
+            return "";
     }
 
     if(hasModule)
-        return StringUtils::sprintf("<%s.%s>", modname, label);
-    return StringUtils::sprintf("<%s>", label);
+    {
+        if(IncludeAddress)
+            return StringUtils::sprintf("<%s.%s> (%p)", modname, label, Address);
+        else
+            return StringUtils::sprintf("<%s.%s>", modname, label);
+    }
+    else
+    {
+        if(IncludeAddress)
+            return StringUtils::sprintf("<%s> (%p)", label, Address);
+        else
+            return StringUtils::sprintf("<%s>", label);
+    }
 }
 
-bool SymGetSourceLine(duint Cip, char* FileName, int* Line, DWORD* disp)
+bool SymbolFromAddressExact(duint address, SYMBOLINFO* info)
+{
+    if(address == 0)
+        return false;
+
+    SHARED_ACQUIRE(LockModules);
+    MODINFO* modInfo = ModInfoFromAddr(address);
+    if(modInfo == nullptr)
+        return false;
+
+    duint base = modInfo->base;
+    duint rva = address - base;
+
+    // search in symbols
+    if(modInfo->symbols->isOpen())
+    {
+        SymbolInfo symInfo;
+        if(modInfo->symbols->findSymbolExact(rva, symInfo))
+        {
+            symInfo.copyToGuiSymbol(base, info);
+            return true;
+        }
+    }
+
+    // search in module exports
+    {
+        auto modExport = modInfo->findExport(rva);
+        if(modExport != nullptr)
+        {
+            modExport->copyToGuiSymbol(base, info);
+            return true;
+        }
+    }
+
+    // module entry point pseudo-symbol
+    if(modInfo->entry != 0 && modInfo->entrySymbol.rva == rva)
+    {
+        modInfo->entrySymbol.convertToGuiSymbol(base, info);
+        return true;
+    }
+
+    // search in module imports (iat)
+    {
+        auto modImport = modInfo->findImport(rva);
+        if(modImport != nullptr)
+        {
+            // for imports by ordinal, try to resolve the real symbol
+            if(modImport->ordinal != -1)
+            {
+                duint exportAddress = 0;
+                if(DbgMemRead(address, &exportAddress, sizeof(exportAddress)) && exportAddress != 0)
+                {
+                    if(SymbolFromAddressExact(exportAddress, info))
+                    {
+                        // override the address of the export symbol with the IAT address
+                        info->addr = address;
+                        return true;
+                    }
+                }
+            }
+
+            // fall back to the import symbol itself
+            modImport->copyToGuiSymbol(base, info);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool SymbolFromAddressExactOrLower(duint address, SYMBOLINFO* info)
+{
+    if(address == 0)
+        return false;
+
+    SHARED_ACQUIRE(LockModules);
+    MODINFO* modInfo = ModInfoFromAddr(address);
+    if(modInfo == nullptr)
+        return false;
+
+    duint rva = address - modInfo->base;
+
+    // search in module symbols
+    if(modInfo->symbols->isOpen())
+    {
+        SymbolInfo symInfo;
+        if(modInfo->symbols->findSymbolExactOrLower(rva, symInfo))
+        {
+            symInfo.copyToGuiSymbol(modInfo->base, info);
+            return true;
+        }
+    }
+
+    // search in module exports
+    if(!modInfo->exports.empty())
+    {
+        auto it = [&]()
+        {
+            auto it = std::lower_bound(modInfo->exportsByRva.begin(), modInfo->exportsByRva.end(), rva, [&modInfo](size_t index, duint rva)
+            {
+                return modInfo->exports.at(index).rva < rva;
+            });
+            // not found
+            if(it == modInfo->exportsByRva.end())
+                return --it;
+            // exact match
+            if(modInfo->exports[*it].rva == rva)
+                return it;
+            // right now 'it' points to the first element bigger than rva
+            return it == modInfo->exportsByRva.begin() ? modInfo->exportsByRva.end() : --it;
+        }
+        ();
+
+        if(it != modInfo->exportsByRva.end())
+        {
+            const auto & symbol = modInfo->exports[*it];
+            symbol.copyToGuiSymbol(modInfo->base, info);
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool SymGetSourceLine(duint Cip, char* FileName, int* Line, duint* disp)
 {
     SHARED_ACQUIRE(LockModules);
     MODINFO* modInfo = ModInfoFromAddr(Cip);

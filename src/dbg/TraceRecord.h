@@ -15,6 +15,7 @@ public:
         InstructionHeading = 1,
         InstructionTailing = 2,
         InstructionOverlapped = 3, // The byte was executed with differing instruction base addresses
+        Unknown = 4,
         DataByte,  // This and the following is not implemented yet.
         DataWord,
         DataDWord,
@@ -55,23 +56,26 @@ public:
     void TraceExecute(duint address, duint size);
     //void TraceAccess(duint address, unsigned char size, TraceRecordByteType accessType);
     void TraceExecuteRecord(const Zydis & newInstruction);
+    void FlushTraceExecuteRecord();
 
     unsigned int getHitCount(duint address);
     TraceRecordByteType getByteType(duint address);
     void increaseInstructionCounter();
 
-    bool isRunTraceEnabled();
-    bool enableRunTrace(bool enabled, const char* fileName);
+    bool isTraceRecordingEnabled();
+    bool enableTraceRecording(bool enabled, const char* fileName);
 
     void saveToDb(JSON root);
     void loadFromDb(JSON root);
 private:
+    // An enumerated value indicating this byte is either start of instruction, middle of instruction, end of instruction, or part of overlapped instruction.
     enum TraceRecordByteType_2bit
     {
         _InstructionBody = 0,
         _InstructionHeading = 1,
         _InstructionTailing = 2,
-        _InstructionOverlapped = 3
+        _InstructionOverlapped = 3,
+        _Unknown = 4 // Never recorded, unknown
     };
 
     struct TraceRecordPage
@@ -94,11 +98,11 @@ private:
     std::unordered_map<duint, TraceRecordPage> TraceRecord;
     std::vector<std::string> ModuleNames;
     unsigned int getModuleIndex(const String & moduleName);
-    unsigned int instructionCounter;
+    unsigned int instructionCounter = 0;
 
-    bool rtEnabled;
-    bool rtPrevInstAvailable;
-    HANDLE rtFile;
+    bool rtEnabled = false;
+    bool rtPrevInstAvailable = false;
+    HANDLE rtFile = nullptr;
 
     REGDUMPWORD rtOldContext;
     bool rtOldContextChanged[(FIELD_OFFSET(REGDUMP, lastError) + sizeof(DWORD)) / sizeof(duint)];
@@ -113,14 +117,6 @@ private:
 };
 
 extern TraceRecordManager TraceRecord;
-void _dbg_dbgtraceexecute(duint CIP);
-
-//exported to bridge
-unsigned int _dbg_dbggetTraceRecordHitCount(duint address);
-TRACERECORDBYTETYPE _dbg_dbggetTraceRecordByteType(duint address);
-bool _dbg_dbgsetTraceRecordType(duint pageAddress, TRACERECORDTYPE type);
-TRACERECORDTYPE _dbg_dbggetTraceRecordType(duint pageAddress);
-bool _dbg_dbgenableRunTrace(bool enabled, const char* fileName);
-bool _dbg_dbgisRunTraceEnabled();
+void dbgtraceexecute(duint CIP);
 
 #endif // TRACERECORD_H

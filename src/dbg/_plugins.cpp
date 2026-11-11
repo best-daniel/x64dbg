@@ -10,6 +10,8 @@
 #include "debugger.h"
 #include "threading.h"
 #include "murmurhash.h"
+#include "stringutils.h"
+#include "testing.h"
 
 ///debugger plugin exports (wrappers)
 PLUG_IMPEXP void _plugin_registercallback(int pluginHandle, CBTYPE cbType, CBPLUGIN cbPlugin)
@@ -41,6 +43,11 @@ PLUG_IMPEXP void _plugin_logprintf(const char* format, ...)
     va_end(args);
 }
 
+PLUG_IMPEXP void _plugin_lograw_html(const char* text)
+{
+    dprint_untranslated_html(text);
+}
+
 PLUG_IMPEXP void _plugin_logputs(const char* text)
 {
     dputs_untranslated(text);
@@ -48,12 +55,12 @@ PLUG_IMPEXP void _plugin_logputs(const char* text)
 
 PLUG_IMPEXP void _plugin_logprint(const char* text)
 {
-    dprintf_untranslated("%s", text);
+    dlogprint_untranslated(text);
 }
 
 PLUG_IMPEXP void _plugin_debugpause()
 {
-    DebugUpdateGuiSetStateAsync(GetContextDataEx(hActiveThread, UE_CIP), true);
+    DebugUpdateGuiSetStateAsync(GetContextDataEx(hActiveThread, UE_CIP), paused);
     lock(WAITID_RUN);
     dbgsetforeground();
     dbgsetskipexceptions(false);
@@ -145,7 +152,7 @@ PLUG_IMPEXP void _plugin_startscript(CBPLUGINSCRIPT cbScript)
 
 PLUG_IMPEXP bool _plugin_waituntilpaused()
 {
-    while(DbgIsDebugging() && dbgisrunning()) //wait until the debugger paused
+    while(bIsDebugging && dbgisrunning()) //wait until the debugger paused
     {
         Sleep(1);
         GuiProcessEvents(); //workaround for scripts being executed on the GUI thread
@@ -156,6 +163,11 @@ PLUG_IMPEXP bool _plugin_waituntilpaused()
 bool _plugin_registerexprfunction(int pluginHandle, const char* name, int argc, CBPLUGINEXPRFUNCTION cbFunction, void* userdata)
 {
     return pluginexprfuncregister(pluginHandle, name, argc, cbFunction, userdata);
+}
+
+bool _plugin_registerexprfunctionex(int pluginHandle, const char* name, ValueType returnType, const ValueType* argTypes, size_t argCount, CBPLUGINEXPRFUNCTIONEX cbFunction, void* userdata)
+{
+    return pluginexprfuncregisterex(pluginHandle, name, returnType, argTypes, argCount, cbFunction, userdata);
 }
 
 bool _plugin_unregisterexprfunction(int pluginHandle, const char* name)
@@ -175,7 +187,7 @@ PLUG_IMPEXP bool _plugin_load(const char* pluginName)
 
 duint _plugin_hash(const void* data, duint size)
 {
-    return murmurhash(data, int(size));
+    return murmurhash(data, (size_t)size);
 }
 
 PLUG_IMPEXP bool _plugin_registerformatfunction(int pluginHandle, const char* type, CBPLUGINFORMATFUNCTION cbFunction, void* userdata)
@@ -186,4 +198,15 @@ PLUG_IMPEXP bool _plugin_registerformatfunction(int pluginHandle, const char* ty
 PLUG_IMPEXP bool _plugin_unregisterformatfunction(int pluginHandle, const char* type)
 {
     return pluginformatfuncunregister(pluginHandle, type);
+}
+
+PLUG_IMPEXP bool _plugin_testassert(bool condition, const char* format, ...)
+{
+    if(!TestIsEnabled())
+        return condition;
+    va_list args;
+    va_start(args, format);
+    auto message = StringUtils::vsprintf(format, args);
+    va_end(args);
+    return TestAssertPlugin(condition, message.c_str());
 }

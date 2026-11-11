@@ -1,11 +1,12 @@
-#ifndef SYMBOLVIEW_H
-#define SYMBOLVIEW_H
+#pragma once
 
 #include <QWidget>
 #include "Bridge.h"
+#include "StdIconTable.h"
 
 class QMenu;
 class StdSearchListView;
+class StdIconSearchListView;
 class SearchListView;
 class SymbolSearchList;
 class QVBoxLayout;
@@ -15,12 +16,33 @@ namespace Ui
     class SymbolView;
 }
 
+class ModuleStdTable final : public StdIconTable
+{
+    Q_OBJECT
+
+public:
+    ModuleStdTable();
+    void updateColors() override;
+    QColor getCellColor(duint r, duint c) override;
+    QString getCellContent(duint r, duint c) override;
+    void sortRows(duint column, bool ascending) override;
+
+private:
+    MODULESYMBOLSTATUS getStatus(duint r);
+
+    QColor mSymbolSystemTextColor;
+    QColor mSymbolUserTextColor;
+    QColor mSymbolUnloadedTextColor;
+    QColor mSymbolLoadingTextColor;
+    QColor mSymbolLoadedTextColor;
+};
+
 class SymbolView : public QWidget
 {
     Q_OBJECT
 
 public:
-    explicit SymbolView(QWidget* parent = 0);
+    explicit SymbolView(QWidget* parent = nullptr);
     ~SymbolView() override;
     void setupContextMenu();
     void saveWindowSettings();
@@ -30,18 +52,20 @@ public:
 
 private slots:
     void updateStyle();
+    void reloadDataSlot();
     void addMsgToSymbolLogSlot(QString msg);
     void clearSymbolLogSlot();
-    void moduleSelectionChanged(int index);
+    void moduleSelectionChanged(duint index);
     void updateSymbolList(int module_count, SYMBOLMODULEINFO* modules);
     void symbolFollow();
     void symbolFollowDump();
     void symbolFollowImport();
     void symbolSelectModule(duint base);
     void enterPressedSlot();
-    void symbolContextMenu(QMenu* wMenu);
+    void symbolContextMenu(QMenu* menu);
     void symbolRefreshCurrent();
-    void moduleContextMenu(QMenu* wMenu);
+    void labelHelpSlot();
+    void moduleContextMenu(QMenu* menu);
     void moduleFollow();
     void moduleEntryFollow();
     void moduleDownloadSymbols();
@@ -69,7 +93,7 @@ private:
     QVBoxLayout* mSymbolLayout;
     QWidget* mSymbolPlaceHolder;
     SearchListView* mSymbolList;
-    StdSearchListView* mModuleList;
+    StdIconSearchListView* mModuleList;
     SymbolSearchList* mSymbolSearchList;
     QMap<QString, duint> mModuleBaseList;
     QAction* mFollowSymbolAction;
@@ -89,8 +113,8 @@ private:
     QAction* mFollowInMemMap;
     QAction* mLoadLib;
     QAction* mFreeLib;
+    QAction* mLabelHelp;
+    QMenu* mPluginMenu;
 
     static void cbSymbolEnum(SYMBOLINFO* symbol, void* user);
 };
-
-#endif // SYMBOLVIEW_H

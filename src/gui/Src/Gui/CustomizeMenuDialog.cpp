@@ -25,10 +25,10 @@ CustomizeMenuDialog::CustomizeMenuDialog(QWidget* parent) :
             builder = i.builder;
             id = builder->getId();
         }
-        else //invalid or unsupported type.Continue
+        else // Invalid or unsupported type. Continue
             continue;
-        //Get localized string for the name of individual views
-        if(id == "CPUDisassembly")
+        // Get localized string for the name of individual views
+        if(id == "CPUDisassemblyV2")
             viewName = tr("Disassembler");
         else if(id == "CPUDump")
             viewName = tr("Dump");
@@ -60,6 +60,10 @@ CustomizeMenuDialog::CustomizeMenuDialog(QWidget* parent) :
             viewName = tr("Help");
         else if(id == "View")
             viewName = tr("View");
+        else if(id == "TraceBrowser")
+            viewName = tr("Trace disassembler");
+        else if(id == "TraceDump")
+            viewName = tr("Trace dump");
         else
             continue;
         // Add Parent Node

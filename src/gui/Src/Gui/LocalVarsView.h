@@ -1,6 +1,7 @@
-#ifndef LOCALVARSVIEW_H
-#define LOCALVARSVIEW_H
+#pragma once
+
 #include "StdTable.h"
+#include "Configuration.h" // DisasmValueNotationType
 
 class CPUMultiDump;
 
@@ -31,7 +32,7 @@ private:
     void setupContextMenu();
     MenuBuilder* mMenu;
 
-    bool HexPrefixValues;
+    DisasmValueNotationType ValueNotation;
     bool MemorySpaces;
 #ifdef _WIN64
     QAction* baseRegisters[16];
@@ -39,5 +40,3 @@ private:
     QAction* baseRegisters[8];
 #endif //_WIN64
 };
-
-#endif //LOCALVARSVIEW_H

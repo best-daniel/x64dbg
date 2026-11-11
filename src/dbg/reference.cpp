@@ -5,6 +5,7 @@
  */
 
 #include "reference.h"
+#include "encodemap.h"
 #include "memory.h"
 #include "console.h"
 #include "module.h"
@@ -53,7 +54,7 @@ int RefFind(duint Address, duint Size, CBREF Callback, void* UserData, bool Sile
 
             // Make sure the size fits in one page
             scanStart = Address;
-            scanSize  = min(Size, maxsize);
+            scanSize  = std::min(Size, maxsize);
         }
 
         // Determine the full module name
@@ -63,14 +64,14 @@ int RefFind(duint Address, duint Size, CBREF Callback, void* UserData, bool Sile
             sprintf_s(fullName, GuiTranslateText(QT_TRANSLATE_NOOP("DBG", "%s (Region %p)")), Name, scanStart);
 
         // Initialize disassembler
-        Zydis cp;
+        Zydis zydis;
 
         // Allow an "initialization" notice
         refInfo.refcount = 0;
         refInfo.userinfo = UserData;
         refInfo.name = fullName;
 
-        RefFindInRange(scanStart, scanSize, Callback, UserData, Silent, refInfo, cp, true, [](int percent)
+        RefFindInRange(scanStart, scanSize, Callback, UserData, Silent, refInfo, zydis, true, [](int percent)
         {
             GuiReferenceSetCurrentTaskProgress(percent, GuiTranslateText(QT_TRANSLATE_NOOP("DBG", "Region Search")));
             GuiReferenceSetProgress(percent);
@@ -101,21 +102,145 @@ int RefFind(duint Address, duint Size, CBREF Callback, void* UserData, bool Sile
         if(ModNameFromAddr(scanStart, moduleName, true))
             sprintf_s(fullName, "%s (%s)", Name, moduleName);
         else
-            sprintf_s(fullName, "%s (%p)", Name, scanStart);
+            sprintf_s(fullName, "%s (%p)", Name, (void*)scanStart);
 
         // Initialize disassembler
-        Zydis cp;
+        Zydis zydis;
 
         // Allow an "initialization" notice
         refInfo.refcount = 0;
         refInfo.userinfo = UserData;
         refInfo.name = fullName;
 
-        RefFindInRange(scanStart, scanSize, Callback, UserData, Silent, refInfo, cp, true, [](int percent)
+        RefFindInRange(scanStart, scanSize, Callback, UserData, Silent, refInfo, zydis, true, [](int percent)
         {
             GuiReferenceSetCurrentTaskProgress(percent, GuiTranslateText(QT_TRANSLATE_NOOP("DBG", "Module Search")));
             GuiReferenceSetProgress(percent);
         }, disasmText);
+    }
+    else if(type == USER_MODULES)  // Search in All User Modules
+    {
+        bool initCallBack = true;
+
+        struct RefModInfo
+        {
+            duint base;
+            duint size;
+            char name[MAX_MODULE_SIZE];
+        };
+        std::vector<RefModInfo> modList;
+        ModEnum([&modList](const MODINFO & mod)
+        {
+            RefModInfo info;
+            info.base = mod.base;
+            info.size = mod.size;
+            strncpy_s(info.name, mod.name, _TRUNCATE);
+            strncat_s(info.name, mod.extension, _TRUNCATE);
+            modList.push_back(info);
+        });
+
+        if(!modList.size())
+        {
+            if(!Silent)
+                dprintf(QT_TRANSLATE_NOOP("DBG", "Couldn't get module list"));
+
+            return 0;
+        }
+
+        // Initialize disassembler
+        Zydis zydis;
+
+        // Determine the full module
+        sprintf_s(fullName, GuiTranslateText(QT_TRANSLATE_NOOP("DBG", "User Modules (%s)")), Name);
+
+        // Allow an "initialization" notice
+        refInfo.refcount = 0;
+        refInfo.userinfo = UserData;
+        refInfo.name = fullName;
+
+        for(duint i = 0; i < modList.size(); i++)
+        {
+            int party = ModGetParty(duint(modList[i].base));
+            if(party != mod_user)
+                continue;
+            scanStart = modList[i].base;
+            scanSize = modList[i].size;
+
+            RefFindInRange(scanStart, scanSize, Callback, UserData, Silent, refInfo, zydis, initCallBack, [&i, &modList](int percent)
+            {
+                float fPercent = (float)percent / 100.f;
+                float fTotalPercent = ((float)i + fPercent) / (float)modList.size();
+
+                int totalPercent = (int)floor(fTotalPercent * 100.f);
+
+                GuiReferenceSetCurrentTaskProgress(percent, modList[i].name);
+                GuiReferenceSetProgress(totalPercent);
+            }, disasmText);
+
+            initCallBack = false;
+        }
+    }
+    else if(type == SYSTEM_MODULES)  // Search in All System Modules
+    {
+        bool initCallBack = true;
+
+        struct RefModInfo
+        {
+            duint base;
+            duint size;
+            char name[MAX_MODULE_SIZE];
+        };
+        std::vector<RefModInfo> modList;
+        ModEnum([&modList](const MODINFO & mod)
+        {
+            RefModInfo info;
+            info.base = mod.base;
+            info.size = mod.size;
+            strncpy_s(info.name, mod.name, _TRUNCATE);
+            strncat_s(info.name, mod.extension, _TRUNCATE);
+            modList.push_back(info);
+        });
+
+        if(!modList.size())
+        {
+            if(!Silent)
+                dprintf(QT_TRANSLATE_NOOP("DBG", "Couldn't get module list"));
+
+            return 0;
+        }
+
+        // Initialize disassembler
+        Zydis zydis;
+
+        // Determine the full module
+        sprintf_s(fullName, GuiTranslateText(QT_TRANSLATE_NOOP("DBG", "System Modules (%s)")), Name);
+
+        // Allow an "initialization" notice
+        refInfo.refcount = 0;
+        refInfo.userinfo = UserData;
+        refInfo.name = fullName;
+
+        for(duint i = 0; i < modList.size(); i++)
+        {
+            int party = ModGetParty(duint(modList[i].base));
+            if(party != mod_system)
+                continue;
+            scanStart = modList[i].base;
+            scanSize = modList[i].size;
+
+
+            RefFindInRange(scanStart, scanSize, Callback, UserData, Silent, refInfo, zydis, initCallBack, [&i, &modList](int percent)
+            {
+                float fPercent = (float)percent / 100.f;
+                float fTotalPercent = ((float)i + fPercent) / (float)modList.size();
+
+                int totalPercent = (int)floor(fTotalPercent * 100.f);
+
+                GuiReferenceSetCurrentTaskProgress(percent, modList[i].name);
+                GuiReferenceSetProgress(totalPercent);
+            }, disasmText);
+            initCallBack = false;
+        }
     }
     else if(type == ALL_MODULES) // Search in all Modules
     {
@@ -147,7 +272,7 @@ int RefFind(duint Address, duint Size, CBREF Callback, void* UserData, bool Sile
         }
 
         // Initialize disassembler
-        Zydis cp;
+        Zydis zydis;
 
         // Determine the full module
         sprintf_s(fullName, GuiTranslateText(QT_TRANSLATE_NOOP("DBG", "All Modules (%s)")), Name);
@@ -165,7 +290,7 @@ int RefFind(duint Address, duint Size, CBREF Callback, void* UserData, bool Sile
             if(i != 0)
                 initCallBack = false;
 
-            RefFindInRange(scanStart, scanSize, Callback, UserData, Silent, refInfo, cp, initCallBack, [&i, &modList](int percent)
+            RefFindInRange(scanStart, scanSize, Callback, UserData, Silent, refInfo, zydis, initCallBack, [&i, &modList](int percent)
             {
                 float fPercent = (float)percent / 100.f;
                 float fTotalPercent = ((float)i + fPercent) / (float)modList.size();
@@ -185,8 +310,15 @@ int RefFind(duint Address, duint Size, CBREF Callback, void* UserData, bool Sile
     return refInfo.refcount;
 }
 
-int RefFindInRange(duint scanStart, duint scanSize, CBREF Callback, void* UserData, bool Silent, REFINFO & refInfo, Zydis & cp, bool initCallBack, const CBPROGRESS & cbUpdateProgress, bool disasmText)
+int RefFindInRange(duint scanStart, duint scanSize, CBREF Callback, void* UserData, bool Silent, REFINFO & refInfo, Zydis & zydis, bool initCallBack, const CBPROGRESS & cbUpdateProgress, bool disasmText)
 {
+    if(scanSize == 0)
+    {
+        if(!Silent)
+            dprintf(QT_TRANSLATE_NOOP("DBG", "Invalid scan size 0 passed to RefFindInRange\n"));
+        return 0;
+    }
+
     // Allocate and read a buffer from the remote process
     Memory<unsigned char*> data(scanSize, "reffind:data");
 
@@ -196,11 +328,13 @@ int RefFindInRange(duint scanStart, duint scanSize, CBREF Callback, void* UserDa
     if(initCallBack)
         Callback(0, 0, &refInfo);
 
+    auto percentCount = scanSize / 500;
+
     //concurrency::parallel_for(duint (0), scanSize, [&](duint i)
     for(duint i = 0; i < scanSize;)
     {
-        // Print the progress every 4096 bytes
-        if((i % 0x1000) == 0)
+        // Print the progress every percent
+        if((i % percentCount) == 0)
         {
             // Percent = (current / total) * 100
             // Integer = floor(percent)
@@ -210,22 +344,30 @@ int RefFindInRange(duint scanStart, duint scanSize, CBREF Callback, void* UserDa
         }
 
         // Disassemble the instruction
-        int disasmMaxSize = min(MAX_DISASM_BUFFER, (int)(scanSize - i)); // Prevent going past the boundary
+        int disasmMaxSize = std::min(MAX_DISASM_BUFFER, (int)(scanSize - i)); // Prevent going past the boundary
         int disasmLen = 1;
 
-        if(cp.Disassemble(scanStart, data() + i, disasmMaxSize))
+        auto type = EncodeMapGetType(scanStart, 0);
+        switch(type)
         {
-            BASIC_INSTRUCTION_INFO basicinfo;
-            fillbasicinfo(&cp, &basicinfo, disasmText);
+        case enc_unknown:
+        case enc_code:
+        case enc_junk:
+        case enc_middle:
+            if(zydis.Disassemble(scanStart, data() + i, disasmMaxSize))
+            {
+                BASIC_INSTRUCTION_INFO basicinfo;
+                fillbasicinfo(&zydis, &basicinfo, disasmText);
 
-            if(Callback(&cp, &basicinfo, &refInfo))
-                refInfo.refcount++;
+                if(Callback(&zydis, &basicinfo, &refInfo))
+                    refInfo.refcount++;
 
-            disasmLen = cp.Size();
-        }
-        else
-        {
-            // Invalid instruction detected, so just skip the byte
+                disasmLen = zydis.Size();
+            }
+            break;
+        default:
+            disasmLen = (int)GetEncodeTypeSize(type);
+            break;
         }
 
         scanStart += disasmLen;

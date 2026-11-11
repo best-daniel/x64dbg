@@ -1,7 +1,8 @@
-#include "cmd-analysis.h"
 #include "ntdll/ntdll.h"
+#include "cmd-analysis.h"
 #include "linearanalysis.h"
 #include "memory.h"
+#include "module.h"
 #include "exceptiondirectoryanalysis.h"
 #include "controlflowanalysis.h"
 #include "analysis_nukem.h"
@@ -90,10 +91,17 @@ bool cbInstrAnalrecur(int argc, char* argv[])
     duint entry;
     if(!valfromstring(argv[1], &entry, false))
         return false;
-    duint size;
+
+    // Attempt to guess function entry point with module/symbol information
+    auto funcEntry = ModFunctionEntryGuessFromAddr(entry);
+    if(funcEntry != 0)
+        entry = funcEntry;
+
+    duint size = 0;
     auto base = MemFindBaseAddr(entry, &size);
     if(!base)
         return false;
+
     RecursiveAnalysis analysis(base, size, entry, true);
     analysis.Analyse();
     analysis.SetMarkers();
@@ -143,7 +151,7 @@ bool cbInstrVirtualmod(int argc, char* argv[])
         return false;
     }
 
-    char modname[256] = "";
+    char modname[MAX_MODULE_SIZE] = "";
     if(ModNameFromAddr(base, modname, true))
         BpEnumAll(cbSetModuleBreakpoints, modname);
 
@@ -188,6 +196,69 @@ bool cbDebugDownloadSymbol(int argc, char* argv[])
     return true;
 }
 
+bool cbDebugLoadSymbol(int argc, char* argv[])
+{
+    if(IsArgumentsLessThan(argc, 3))
+        return false;
+    //get some module information
+    duint modbase = ModBaseFromName(argv[1]);
+    if(!modbase)
+    {
+        dprintf(QT_TRANSLATE_NOOP("DBG", "Invalid module \"%s\"!\n"), argv[1]);
+        return false;
+    }
+    auto pdbFile = argv[2];
+    if(!FileExists(pdbFile))
+    {
+        dputs(QT_TRANSLATE_NOOP("DBG", "File does not exist!"));
+        return false;
+    }
+    bool forceLoad = argc > 3 && DbgEval(argv[3]);
+    EXCLUSIVE_ACQUIRE(LockModules);
+    auto info = ModInfoFromAddr(modbase);
+    if(!info)
+    {
+        // TODO: this really isn't supposed to happen, but could if the module is suddenly unloaded
+        dputs("module not found...");
+        return false;
+    }
+
+    // trigger a symbol load
+    if(!info->loadSymbols(pdbFile, forceLoad))
+    {
+        dputs(QT_TRANSLATE_NOOP("DBG", "Symbol load failed... See symbol log for more information"));
+        return false;
+    }
+    GuiSymbolRefreshCurrent();
+    dputs(QT_TRANSLATE_NOOP("DBG", "Done! See symbol log for more information"));
+    return true;
+}
+
+bool cbDebugUnloadSymbol(int argc, char* argv[])
+{
+    if(IsArgumentsLessThan(argc, 2))
+        return false;
+    //get some module information
+    duint modbase = ModBaseFromName(argv[1]);
+    if(!modbase)
+    {
+        dprintf(QT_TRANSLATE_NOOP("DBG", "Invalid module \"%s\"!\n"), argv[1]);
+        return false;
+    }
+    EXCLUSIVE_ACQUIRE(LockModules);
+    auto info = ModInfoFromAddr(modbase);
+    if(!info)
+    {
+        // TODO: this really isn't supposed to happen, but could if the module is suddenly unloaded
+        dputs("module not found...");
+        return false;
+    }
+    info->unloadSymbols();
+    GuiRepaintTableView();
+    dputs(QT_TRANSLATE_NOOP("DBG", "Done!"));
+    return true;
+}
+
 bool cbInstrImageinfo(int argc, char* argv[])
 {
     duint address;
@@ -207,8 +278,11 @@ bool cbInstrImageinfo(int argc, char* argv[])
             dputs(QT_TRANSLATE_NOOP("DBG", "Invalid argument"));
             return false;
         }
-        c = GetPE32DataFromMappedFile(modinfo->fileMapVA, 0, UE_CHARACTERISTICS);
-        dllc = GetPE32DataFromMappedFile(modinfo->fileMapVA, 0, UE_DLLCHARACTERISTICS);
+        if(auto headers = modinfo->headers)
+        {
+            c = headers->FileHeader.Characteristics;
+            dllc = headers->OptionalHeader.DllCharacteristics;
+        }
         mod = modinfo->base;
     }
 
@@ -313,11 +387,7 @@ static void printExhandlers(const char* name, const std::vector<duint> & entries
     dprintf("%s:\n", name);
     for(auto entry : entries)
     {
-        auto symbolic = SymGetSymbolicName(entry);
-        if(symbolic.length())
-            dprintf_untranslated("%p %s\n", entry, symbolic.c_str());
-        else
-            dprintf_untranslated("%p\n", entry);
+        dputs_untranslated(SymGetSymbolicName(entry).c_str());
     }
 }
 
@@ -385,20 +455,12 @@ bool cbInstrExinfo(int argc, char* argv[])
     else
         dprintf_untranslated("           ExceptionCode: %08X\n", record.ExceptionCode);
     dprintf_untranslated("          ExceptionFlags: %08X\n", record.ExceptionFlags);
-    auto symbolic = SymGetSymbolicName(duint(record.ExceptionAddress));
-    if(symbolic.length())
-        dprintf_untranslated("        ExceptionAddress: %p %s\n", record.ExceptionAddress, symbolic.c_str());
-    else
-        dprintf_untranslated("        ExceptionAddress: %p\n", record.ExceptionAddress);
+    dprintf_untranslated("        ExceptionAddress: %s\n", SymGetSymbolicName(duint(record.ExceptionAddress)).c_str());
     dprintf_untranslated("        NumberParameters: %u\n", record.NumberParameters);
     if(record.NumberParameters)
         for(DWORD i = 0; i < record.NumberParameters; i++)
         {
-            symbolic = SymGetSymbolicName(duint(record.ExceptionInformation[i]));
-            if(symbolic.length())
-                dprintf_untranslated("ExceptionInformation[%02u]: %p %s", i, record.ExceptionInformation[i], symbolic.c_str());
-            else
-                dprintf_untranslated("ExceptionInformation[%02u]: %p", i, record.ExceptionInformation[i]);
+            dprintf_untranslated("ExceptionInformation[%02u]: %s", i, SymGetSymbolicName(duint(record.ExceptionInformation[i])).c_str());
             //https://msdn.microsoft.com/en-us/library/windows/desktop/aa363082(v=vs.85).aspx
             if(record.ExceptionCode == EXCEPTION_ACCESS_VIOLATION ||
                     record.ExceptionCode == EXCEPTION_IN_PAGE_ERROR ||
@@ -430,6 +492,6 @@ bool cbInstrTraceexecute(int argc, char* argv[])
     duint addr;
     if(!valfromstring(argv[1], &addr, false))
         return false;
-    _dbg_dbgtraceexecute(addr);
+    dbgtraceexecute(addr);
     return true;
 }

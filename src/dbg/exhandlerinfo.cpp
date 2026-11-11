@@ -12,13 +12,12 @@
 
 bool IsVistaOrLater()
 {
-    static bool vistaOrLater = []()
-    {
-        OSVERSIONINFOEXW osvi = { 0 };
-        osvi.dwOSVersionInfoSize = sizeof(osvi);
-        return GetVersionExW((LPOSVERSIONINFOW)&osvi) && osvi.dwMajorVersion > 5;
-    }();
-    return vistaOrLater;
+    return BridgeGetNtBuildNumber() >= 6000;
+}
+
+bool Is19042OrLater()
+{
+    return BridgeGetNtBuildNumber() >= 19042;
 }
 
 bool ExHandlerGetInfo(EX_HANDLER_TYPE Type, std::vector<duint> & Entries)
@@ -85,7 +84,6 @@ bool ExHandlerGetSEH(std::vector<duint> & Entries)
     return true;
 }
 
-#pragma pack(8)
 struct VEH_ENTRY_XP
 {
     duint Flink;
@@ -133,13 +131,13 @@ bool ExHandlerGetVEH(std::vector<duint> & Entries)
     return ExHandlerGetVCH(Entries, true);
 }
 
-#pragma pack(8)
 struct VEH_ENTRY_VISTA
 {
     duint Flink;
     duint Blink;
-    DWORD Count;
-    duint VectoredHandler;
+    duint PtrRefCount;
+    duint VectoredHandler; // unclear when this changed
+    duint VectoredHandler2;
 };
 
 bool ExHandlerGetVCH(std::vector<duint> & Entries, bool GetVEH)
@@ -174,6 +172,9 @@ bool ExHandlerGetVCH(std::vector<duint> & Entries, bool GetVEH)
         if(!MemRead(cur_entry, &entry, sizeof(entry)))
             return false;
         auto handler = entry.VectoredHandler;
+        // At some point Windows updated the structure
+        if(Is19042OrLater())
+            handler = entry.VectoredHandler2;
         if(!MemDecodePointer(&handler, true))
             return false;
         Entries.push_back(handler);

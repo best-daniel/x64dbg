@@ -3,14 +3,16 @@
 #include "ui_GotoDialog.h"
 #include "StringUtil.h"
 #include "Configuration.h"
-#include "QCompleter"
 #include "SymbolAutoCompleteModel.h"
 
-GotoDialog::GotoDialog(QWidget* parent, bool allowInvalidExpression, bool allowInvalidAddress)
+#include <QCompleter>
+
+GotoDialog::GotoDialog(QWidget* parent, bool allowInvalidExpression, bool allowInvalidAddress, bool allowNotDebugging)
     : QDialog(parent),
       ui(new Ui::GotoDialog),
       allowInvalidExpression(allowInvalidExpression),
-      allowInvalidAddress(allowInvalidAddress || allowInvalidExpression)
+      allowInvalidAddress(allowInvalidAddress || allowInvalidExpression),
+      allowNotDebugging(allowNotDebugging)
 {
     //setup UI first
     ui->setupUi(this);
@@ -18,7 +20,7 @@ GotoDialog::GotoDialog(QWidget* parent, bool allowInvalidExpression, bool allowI
     setWindowFlags(windowFlags() & ~Qt::WindowContextHelpButtonHint | Qt::MSWindowsFixedSizeDialogHint);
 
     //initialize stuff
-    if(!DbgIsDebugging()) //not debugging
+    if(!allowNotDebugging && !DbgIsDebugging()) //not debugging
         ui->labelError->setText(tr("<font color='red'><b>Not debugging...</b></font>"));
     else
         ui->labelError->setText(tr("<font color='red'><b>Invalid expression...</b></font>"));
@@ -29,49 +31,43 @@ GotoDialog::GotoDialog(QWidget* parent, bool allowInvalidExpression, bool allowI
     {
         return mCompletionText;
     }, completer));
+    completer->setCaseSensitivity(Config()->getBool("Gui", "CaseSensitiveAutoComplete") ? Qt::CaseSensitive : Qt::CaseInsensitive);
     if(!Config()->getBool("Gui", "DisableAutoComplete"))
         ui->editExpression->setCompleter(completer);
-    validRangeStart = 0;
-    validRangeEnd = ~0;
-    fileOffset = false;
     mValidateThread = new ValidateExpressionThread(this);
     mValidateThread->setOnExpressionChangedCallback(std::bind(&GotoDialog::validateExpression, this, std::placeholders::_1));
 
     connect(mValidateThread, SIGNAL(expressionChanged(bool, bool, dsint)), this, SLOT(expressionChanged(bool, bool, dsint)));
     connect(ui->editExpression, SIGNAL(textChanged(QString)), mValidateThread, SLOT(textChanged(QString)));
     connect(ui->editExpression, SIGNAL(textEdited(QString)), this, SLOT(textEditedSlot(QString)));
+    connect(ui->labelError, SIGNAL(linkActivated(QString)), this, SLOT(linkActivated(QString)));
     connect(this, SIGNAL(finished(int)), this, SLOT(finishedSlot(int)));
     connect(Config(), SIGNAL(disableAutoCompleteUpdated()), this, SLOT(disableAutoCompleteUpdated()));
 
-    Config()->setupWindowPos(this);
+    auto prevSize = size();
+    Config()->loadWindowGeometry(this);
+    this->resize(prevSize);
 }
 
 GotoDialog::~GotoDialog()
 {
     mValidateThread->stop();
     mValidateThread->wait();
-    Config()->saveWindowPos(this);
+    Config()->saveWindowGeometry(this);
     delete ui;
 }
 
-void GotoDialog::showEvent(QShowEvent* event)
+int GotoDialog::exec()
 {
-    Q_UNUSED(event);
-    mValidateThread->start();
+    expressionText.clear();
+    return QDialog::exec();
 }
 
-void GotoDialog::hideEvent(QHideEvent* event)
+void GotoDialog::validateExpression(const QString & expression)
 {
-    Q_UNUSED(event);
-    mValidateThread->stop();
-    mValidateThread->wait();
-}
-
-void GotoDialog::validateExpression(QString expression)
-{
-    duint value;
+    duint value = 0;
     bool validExpression = DbgFunctions()->ValFromString(expression.toUtf8().constData(), &value);
-    unsigned char ch;
+    unsigned char ch = 0;
     bool validPointer = validExpression && DbgMemIsValidReadPtr(value) && DbgMemRead(value, &ch, sizeof(ch));
     this->mValidateThread->emitExpressionChanged(validExpression, validPointer, value);
 }
@@ -82,18 +78,45 @@ void GotoDialog::setInitialExpression(const QString & expression)
     emit ui->editExpression->textEdited(expression);
 }
 
+void GotoDialog::showEvent(QShowEvent* event)
+{
+    Q_UNUSED(event);
+    expressionText.clear();
+    mValidateThread->start();
+
+    // Fix the label width
+    ui->labelError->setMaximumWidth(ui->labelError->width());
+}
+
+void GotoDialog::hideEvent(QHideEvent* event)
+{
+    Q_UNUSED(event);
+    mValidateThread->stop();
+    mValidateThread->wait();
+}
+
 void GotoDialog::expressionChanged(bool validExpression, bool validPointer, dsint value)
 {
     QString expression = ui->editExpression->text();
     if(!expression.length())
     {
-        ui->labelError->setText(tr("<font color='red'><b>Empty expression...</b></font>"));
+        QString tips[] = {"RVA", tr("File offset"), "PEB", "TEB"};
+        const char* expressions[] = {":$%", ":#%", "peb()", "teb()"};
+        QString labelText(tr("Shortcuts: "));
+        for(size_t i = 0; i < 4; i++)
+        {
+            labelText += "<a href=\"";
+            labelText += QString(expressions[i]).replace('%', "%" + tips[i] + "%") + "\">" + QString(expressions[i]).replace('%', tips[i]) + "</a>";
+            if(i < 3)
+                labelText += '\t';
+        }
+        ui->labelError->setText(labelText);
         setOkEnabled(false);
         expressionText.clear();
     }
     if(expressionText == expression)
         return;
-    if(!DbgIsDebugging()) //not debugging
+    if(!allowNotDebugging && !DbgIsDebugging()) //not debugging
     {
         ui->labelError->setText(tr("<font color='red'><b>Not debugging...</b></font>"));
         setOkEnabled(false);
@@ -133,7 +156,7 @@ void GotoDialog::expressionChanged(bool validExpression, bool validPointer, dsin
             setOkEnabled(false);
             expressionText.clear();
         }
-        else if(!IsValidMemoryRange(addr) && !allowInvalidAddress)
+        else if(!isValidMemoryRange(addr) && !allowInvalidAddress)
         {
             ui->labelError->setText(tr("<font color='red'><b>Memory out of range...</b></font>") + addrText);
             setOkEnabled(false);
@@ -154,14 +177,16 @@ void GotoDialog::expressionChanged(bool validExpression, bool validPointer, dsin
                 addrText = QString(module) + "." + ToPtrString(addr);
             else
                 addrText = ToPtrString(addr);
-            ui->labelError->setText(tr("<font color='#00DD00'><b>Correct expression! -&gt; </b></font>") + addrText);
+
+            ui->labelError->setToolTip(QString("<qt>%1</qt>").arg(addrText.toHtmlEscaped()));
+            ui->labelError->setText(tr("<font color='#00DD00'><b>Correct expression! -&gt; </b></font>") + addrText.toHtmlEscaped());
             setOkEnabled(true);
             expressionText = expression;
         }
     }
 }
 
-bool GotoDialog::IsValidMemoryRange(duint addr)
+bool GotoDialog::isValidMemoryRange(duint addr)
 {
     return addr >= validRangeStart && addr < validRangeEnd;
 }
@@ -175,7 +200,7 @@ void GotoDialog::on_buttonOk_clicked()
 {
     QString expression = ui->editExpression->text();
     ui->editExpression->addLineToHistory(expression);
-    ui->editExpression->setText("");
+    ui->editExpression->clear();
     expressionChanged(false, false, 0);
     expressionText = expression;
 }
@@ -183,13 +208,26 @@ void GotoDialog::on_buttonOk_clicked()
 void GotoDialog::finishedSlot(int result)
 {
     if(result == QDialog::Rejected)
-        ui->editExpression->setText("");
+        ui->editExpression->clear();
     ui->editExpression->setFocus();
 }
 
 void GotoDialog::textEditedSlot(QString text)
 {
     mCompletionText = text;
+}
+
+void GotoDialog::linkActivated(const QString & link)
+{
+    if(link.contains('%'))
+    {
+        int x = link.indexOf('%');
+        int y = link.lastIndexOf('%');
+        ui->editExpression->setText(QString(link).replace('%', ""));
+        ui->editExpression->setSelection(x, y - 1);
+    }
+    else
+        ui->editExpression->setText(link);
 }
 
 void GotoDialog::disableAutoCompleteUpdated()

@@ -1,29 +1,39 @@
 #include "LogStatusLabel.h"
-#include <QTextDocument>
+#include "LogView.h"
+#include <QAccessible>
 #include <QApplication>
+#include <QTextDocumentFragment>
+#include <QStatusBar>
 
 LogStatusLabel::LogStatusLabel(QStatusBar* parent) : QLabel(parent)
 {
-    this->setFrameStyle(QFrame::Sunken | QFrame::Panel); //sunken style
-    this->setStyleSheet("QLabel { background-color : #C0C0C0; }");
-
-    this->setTextFormat(Qt::PlainText);
+    this->setTextFormat(Qt::RichText);
+    this->setOpenExternalLinks(false);
+    this->setTextInteractionFlags(Qt::LinksAccessibleByMouse);
     setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
     connect(Bridge::getBridge(), SIGNAL(addMsgToLog(QByteArray)), this, SLOT(logUpdateUtf8(QByteArray)));
+    connect(Bridge::getBridge(), SIGNAL(addMsgToLogHtml(QByteArray)), this, SLOT(logUpdateUtf8Html(QByteArray)));
     connect(Bridge::getBridge(), SIGNAL(addMsgToStatusBar(QString)), this, SLOT(logUpdate(QString)));
     connect(Bridge::getBridge(), SIGNAL(getActiveView(ACTIVEVIEW*)), this, SLOT(getActiveView(ACTIVEVIEW*)));
     connect(QApplication::instance(), SIGNAL(focusChanged(QWidget*, QWidget*)), this, SLOT(focusChanged(QWidget*, QWidget*)));
+    connect(this, SIGNAL(linkActivated(QString)), this, SLOT(linkActivatedSlot(QString)));
 }
 
-void LogStatusLabel::logUpdate(QString message)
+void LogStatusLabel::logUpdate(QString message, bool encodeHTML)
 {
     //TODO: This subroutine can be optimized
     if(!message.length())
         return;
+    // See LogView::addMsgToLogSlotRaw for details on the logic
+    if(encodeHTML)
+    {
+        message = message.toHtmlEscaped();
+        message.replace(QChar(' '), QString("&nbsp;"));
+        LogView::linkify(message);
+    }
     labelText += message.replace("\r\n", "\n");
     QStringList lineList = labelText.split('\n');
     labelText = lineList.last(); //if the last character is a newline this will be an empty string
-    QString finalLabel;
     for(int i = 0; i < lineList.length(); i++)
     {
         const QString & line = lineList[lineList.size() - i - 1];
@@ -34,11 +44,25 @@ void LogStatusLabel::logUpdate(QString message)
         }
     }
     setText(finalLabel);
+    // A status-bar label is passive and its automatic NameChanged event is not
+    // announced by Narrator. Send the explicit live ValueChanged notification
+    // and strip any rich-text markup from its payload.
+    if(QAccessible::isActive())
+    {
+        QAccessibleValueChangeEvent updateEvent(
+            this, QTextDocumentFragment::fromHtml(finalLabel).toPlainText());
+        QAccessible::updateAccessibility(&updateEvent);
+    }
 }
 
 void LogStatusLabel::logUpdateUtf8(QByteArray message)
 {
     logUpdate(QString::fromUtf8(message));
+}
+
+void LogStatusLabel::logUpdateUtf8Html(QByteArray message)
+{
+    logUpdate(QString::fromUtf8(message), false);
 }
 
 void LogStatusLabel::focusChanged(QWidget* old, QWidget* now)
@@ -80,5 +104,21 @@ void LogStatusLabel::getActiveView(ACTIVEVIEW* active)
     QWidget* now = QApplication::focusWidget();
     strncpy_s(active->title, findTitle(now, active->titleHwnd).toUtf8().constData(), _TRUNCATE);
     strncpy_s(active->className, className(now, active->classHwnd).toUtf8().constData(), _TRUNCATE);
-    Bridge::getBridge()->setResult();
+    Bridge::getBridge()->setResult(BridgeResult::GetActiveView);
+}
+
+void LogStatusLabel::showMessage(const QString & message)
+{
+    statusTip = message;
+    if(statusTip.isEmpty())
+        setText(finalLabel);
+    else
+    {
+        setText(statusTip);
+    }
+}
+
+void LogStatusLabel::linkActivatedSlot(const QString & link)
+{
+    LogView::handleLink(this, QUrl(link));
 }

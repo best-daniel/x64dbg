@@ -1,5 +1,4 @@
-#ifndef LABELEDSPLITTER_H
-#define LABELEDSPLITTER_H
+#pragma once
 
 #include <QSplitter>
 
@@ -20,14 +19,15 @@ public:
 
 public slots:
     void attachSlot(LabeledSplitterDetachedWindow* widget);
-    void contextMenuEvent(QContextMenuEvent* event);
 
 protected slots:
     void detachSlot();
     void collapseSlot();
-    void closeSlot();
+    void shutdownSlot();
 
 protected:
+    void contextMenuEvent(QContextMenuEvent* event) override;
+
     QMenu* mMenu;
     QAction* mExpandCollapseAction;
     QString mConfigName;
@@ -44,5 +44,3 @@ private:
     QList<QString> mNames;
     QList<QWidget*> mWindows;
 };
-
-#endif //LABELEDSPLITTER_H

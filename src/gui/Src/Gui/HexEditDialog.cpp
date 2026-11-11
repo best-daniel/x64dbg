@@ -8,6 +8,7 @@
 #include "Bridge.h"
 #include "CodepageSelectionDialog.h"
 #include "LineEditDialog.h"
+#include "StringUtil.h"
 
 #ifndef AF_INET6
 #define AF_INET6        23              // Internetwork Version 6
@@ -25,8 +26,10 @@ HexEditDialog::HexEditDialog(QWidget* parent) : QDialog(parent), ui(new Ui::HexE
     //setup text fields
     ui->lineEditAscii->setEncoding(QTextCodec::codecForName("System"));
     ui->lineEditUnicode->setEncoding(QTextCodec::codecForName("UTF-16"));
-
+    ui->chkKeepSize->setChecked(ConfigBool("HexDump", "KeepSize"));
+    ui->chkKeepSize->hide();
     ui->chkEntireBlock->hide();
+    ui->chkFromSelection->hide();
 
     mDataInitialized = false;
     stringEditorLock = false;
@@ -57,15 +60,16 @@ HexEditDialog::HexEditDialog(QWidget* parent) : QDialog(parent), ui(new Ui::HexE
     mTypes[DataCString] = FormatType { tr("C-Style String"), 1 };
     mTypes[DataCUnicodeString] = FormatType { tr("C-Style Unicode String"), 1 };
     mTypes[DataCShellcodeString] = FormatType { tr("C-Style Shellcode String"), 1 };
-    mTypes[DataASMByte] = FormatType { tr("ASM-Style BYTE (Hex)"), 16 };
-    mTypes[DataASMWord] = FormatType { tr("ASM-Style WORD (Hex)"), 12 };
-    mTypes[DataASMDWord] = FormatType { tr("ASM-Style DWORD (Hex)"), 8 };
-    mTypes[DataASMQWord] = FormatType { tr("ASM-Style QWORD (Hex)"), 4 };
+    mTypes[DataASMByte] = FormatType { tr("ASM-Style BYTE (Hex)"), 16, "DB"};
+    mTypes[DataASMWord] = FormatType { tr("ASM-Style WORD (Hex)"), 12, "DW"};
+    mTypes[DataASMDWord] = FormatType { tr("ASM-Style DWORD (Hex)"), 8, "DD"};
+    mTypes[DataASMQWord] = FormatType { tr("ASM-Style QWORD (Hex)"), 4, "DQ"};
     mTypes[DataASMString] = FormatType { tr("ASM-Style String"), 4 };
     mTypes[DataPascalByte] = FormatType { tr("Pascal BYTE (Hex)"), 42 };
     mTypes[DataPascalWord] = FormatType { tr("Pascal WORD (Hex)"), 21 };
     mTypes[DataPascalDword] = FormatType { tr("Pascal DWORD (Hex)"), 10 };
     mTypes[DataPascalQword] = FormatType { tr("Pascal QWORD (Hex)"), 5 };
+    mTypes[DataPython3Byte] = FormatType { tr("Python 3 BYTE (Hex)"), 1 };
     mTypes[DataString] = FormatType { tr("String"), 1 };
     mTypes[DataUnicodeString] = FormatType { tr("Unicode String"), 1 };
     mTypes[DataUTF8String] = FormatType { tr("UTF8 String"), 1 };
@@ -85,26 +89,42 @@ HexEditDialog::HexEditDialog(QWidget* parent) : QDialog(parent), ui(new Ui::HexE
     for(int i = 0; i < DataLast; i++)
         ui->listType->addItem(mTypes[i].name);
 
-    QModelIndex index = ui->listType->model()->index(DataCByte, 0);
+    duint lastDataType = ConfigUint("HexDump", "CopyDataType");
+    lastDataType = std::min(lastDataType, static_cast<duint>(ui->listType->count() - 1));
+    QModelIndex index = ui->listType->model()->index(lastDataType, 0);
     ui->listType->setCurrentIndex(index);
 
-    Config()->setupWindowPos(this);
+    Config()->loadWindowGeometry(this);
 }
 
 HexEditDialog::~HexEditDialog()
 {
-    Config()->saveWindowPos(this);
+    Config()->saveWindowGeometry(this);
     delete ui;
-}
-
-void HexEditDialog::showEntireBlock(bool show)
-{
-    ui->chkEntireBlock->setVisible(show);
 }
 
 void HexEditDialog::showKeepSize(bool show)
 {
     ui->chkKeepSize->setVisible(show);
+}
+
+void HexEditDialog::setupFindMode(duint rangeStart, duint rangeEnd, duint selectionStart, bool startFromSelection)
+{
+    mRangeStart = rangeStart;
+    mRangeEnd = rangeEnd;
+    mSelectionStart = selectionStart;
+
+    // Only show the checkbox if selection is different from range start
+    bool hasSelection = (selectionStart != rangeStart);
+    ui->chkFromSelection->setVisible(hasSelection);
+    ui->chkFromSelection->setChecked(hasSelection ? startFromSelection : false);
+
+    // Generate range texts using ToPtrString
+    mSearchRangeFromStart = tr("Search range: %1 - %2").arg(ToPtrString(rangeStart)).arg(ToPtrString(rangeEnd));
+    mSearchRangeFromSelection = tr("Search range: %1 - %2").arg(ToPtrString(selectionStart)).arg(ToPtrString(rangeEnd));
+
+    // Update the label
+    updateSearchRangeLabel();
 }
 
 void HexEditDialog::isDataCopiable(bool copyDataEnabled)
@@ -140,9 +160,9 @@ void HexEditDialog::updateCodepage(const QByteArray & name)
     ui->labelLastCodepage2->setText(ui->labelLastCodepage->text());
 }
 
-bool HexEditDialog::entireBlock()
+bool HexEditDialog::startFromSelection()
 {
-    return ui->chkEntireBlock->isChecked();
+    return ui->chkFromSelection->isChecked();
 }
 
 void HexEditDialog::updateStyle()
@@ -160,10 +180,13 @@ void HexEditDialog::updateStyle()
 
 void HexEditDialog::on_chkKeepSize_toggled(bool checked)
 {
+    if(!this->isVisible())
+        return;
     mHexEdit->setKeepSize(checked);
     ui->lineEditAscii->setKeepSize(checked);
     ui->lineEditUnicode->setKeepSize(checked);
     ui->lineEditCodepage->setKeepSize(checked);
+    Config()->setBool("HexDump", "KeepSize", checked);
 }
 
 void HexEditDialog::dataChangedSlot()
@@ -394,7 +417,7 @@ static QString printEscapedString(bool & bPrevWasHex, int ch, const char* hexFor
 }
 
 template<typename T>
-static QString formatLoop(const QByteArray & bytes, int itemsPerLine, QString(*format)(T))
+static QString formatLoop(const QByteArray & bytes, const HexEditDialog::FormatType & type, QString(*format)(T))
 {
     QString data;
     int count = bytes.size() / sizeof(T);
@@ -403,10 +426,16 @@ static QString formatLoop(const QByteArray & bytes, int itemsPerLine, QString(*f
         if(i)
         {
             data += ',';
-            if(itemsPerLine > 0 && i % itemsPerLine == 0)
+            if(type.itemsPerLine > 0 && i % type.itemsPerLine == 0)
+            {
                 data += '\n';
-            else
+                data += type.linePrefix;
                 data += ' ';
+            }
+            else
+            {
+                data += ' ';
+            }
         }
 
         data += format(((const T*)bytes.constData())[i]);
@@ -431,7 +460,7 @@ void HexEditDialog::printData(DataType type)
     {
     case DataCByte:
     {
-        data = "{\n" + formatLoop<unsigned char>(mData, mTypes[mIndex].itemsPerLine, [](unsigned char n)
+        data = "{\n" + formatLoop<unsigned char>(mData, mTypes[mIndex], [](unsigned char n)
         {
             return QString().sprintf("0x%02X", n);
         }) + "\n};";
@@ -440,7 +469,7 @@ void HexEditDialog::printData(DataType type)
 
     case DataCWord:
     {
-        data = "{\n" + formatLoop<unsigned short>(mData, mTypes[mIndex].itemsPerLine, [](unsigned short n)
+        data = "{\n" + formatLoop<unsigned short>(mData, mTypes[mIndex], [](unsigned short n)
         {
             return QString().sprintf("0x%04X", n);
         }) + "\n};";
@@ -449,7 +478,7 @@ void HexEditDialog::printData(DataType type)
 
     case DataCDword:
     {
-        data = "{\n" + formatLoop<unsigned int>(mData, mTypes[mIndex].itemsPerLine, [](unsigned int n)
+        data = "{\n" + formatLoop<unsigned int>(mData, mTypes[mIndex], [](unsigned int n)
         {
             return QString().sprintf("0x%08X", n);
         }) + "\n};";
@@ -458,7 +487,7 @@ void HexEditDialog::printData(DataType type)
 
     case DataCQword:
     {
-        data = "{\n" + formatLoop<unsigned long long>(mData, mTypes[mIndex].itemsPerLine, [](unsigned long long n)
+        data = "{\n" + formatLoop<unsigned long long>(mData, mTypes[mIndex], [](unsigned long long n)
         {
             return QString().sprintf("0x%016llX", n);
         }) + "\n};";
@@ -502,9 +531,12 @@ void HexEditDialog::printData(DataType type)
 
     case DataCShellcodeString:
     {
+        const int itemsPerLine = mTypes[mIndex].itemsPerLine;
         data += "\"";
         for(int i = 0; i < mData.size(); i++)
         {
+            if(i && itemsPerLine > 1 && (i % itemsPerLine) == 0)
+                data += "\" \\\n\"";
             byte_t ch = mData.at(i);
             data += QString().sprintf("\\x%02X", ch);
         }
@@ -538,7 +570,7 @@ void HexEditDialog::printData(DataType type)
 
     case DataASMByte:
     {
-        data = "array DB " + formatLoop<unsigned char>(mData, mTypes[mIndex].itemsPerLine, [](unsigned char n)
+        data = "array DB " + formatLoop<unsigned char>(mData, mTypes[mIndex], [](unsigned char n)
         {
             QString value = QString().sprintf("%02Xh", n);
             if(value.at(0).isLetter())
@@ -551,7 +583,7 @@ void HexEditDialog::printData(DataType type)
 
     case DataASMWord:
     {
-        data = "array DW " + formatLoop<unsigned short>(mData, mTypes[mIndex].itemsPerLine, [](unsigned short n)
+        data = "array DW " + formatLoop<unsigned short>(mData, mTypes[mIndex], [](unsigned short n)
         {
             QString value = QString().sprintf("%04Xh", n);
             if(value.at(0).isLetter())
@@ -564,7 +596,7 @@ void HexEditDialog::printData(DataType type)
 
     case DataASMDWord:
     {
-        data = "array DD " + formatLoop<unsigned int>(mData, mTypes[mIndex].itemsPerLine, [](unsigned int n)
+        data = "array DD " + formatLoop<unsigned int>(mData, mTypes[mIndex], [](unsigned int n)
         {
             QString value = QString().sprintf("%08Xh", n);
             if(value.at(0).isLetter())
@@ -577,7 +609,7 @@ void HexEditDialog::printData(DataType type)
 
     case DataASMQWord:
     {
-        data = "array DQ " + formatLoop<unsigned long long>(mData, mTypes[mIndex].itemsPerLine, [](unsigned long long n)
+        data = "array DQ " + formatLoop<unsigned long long>(mData, mTypes[mIndex], [](unsigned long long n)
         {
             QString value = QString().sprintf("%016llXh", n);
             if(value.at(0).isLetter())
@@ -611,7 +643,7 @@ void HexEditDialog::printData(DataType type)
             }
             else
             {
-                QString asmhex = QString().sprintf("%02Xh", mData.at(index));
+                QString asmhex = QString().sprintf("%02Xh", (unsigned char)mData.at(index));
                 if(asmhex.at(0).isLetter())
                     asmhex.insert(0, "0");
 
@@ -638,7 +670,7 @@ void HexEditDialog::printData(DataType type)
     case DataPascalByte:
     {
         data += QString().sprintf("Array [1..%u] of Byte = (\n", mData.size());
-        data += formatLoop<unsigned char>(mData, mTypes[mIndex].itemsPerLine, [](unsigned char n)
+        data += formatLoop<unsigned char>(mData, mTypes[mIndex], [](unsigned char n)
         {
             return QString().sprintf("$%02X", n);
         });
@@ -649,7 +681,7 @@ void HexEditDialog::printData(DataType type)
     case DataPascalWord:
     {
         data += QString().sprintf("Array [1..%u] of Word = (\n", mData.size() / 2);
-        data += formatLoop<unsigned short>(mData, mTypes[mIndex].itemsPerLine, [](unsigned short n)
+        data += formatLoop<unsigned short>(mData, mTypes[mIndex], [](unsigned short n)
         {
             return QString().sprintf("$%04X", n);
         });
@@ -660,7 +692,7 @@ void HexEditDialog::printData(DataType type)
     case DataPascalDword:
     {
         data += QString().sprintf("Array [1..%u] of Dword = (\n", mData.size() / 4);
-        data += formatLoop<unsigned int>(mData, mTypes[mIndex].itemsPerLine, [](unsigned int n)
+        data += formatLoop<unsigned int>(mData, mTypes[mIndex], [](unsigned int n)
         {
             return QString().sprintf("$%08X", n);
         });
@@ -671,7 +703,7 @@ void HexEditDialog::printData(DataType type)
     case DataPascalQword:
     {
         data += QString().sprintf("Array [1..%u] of Int64 = (\n", mData.size() / 8);
-        data += formatLoop<unsigned long long>(mData, mTypes[mIndex].itemsPerLine, [](unsigned long long n)
+        data += formatLoop<unsigned long long>(mData, mTypes[mIndex], [](unsigned long long n)
         {
             return QString().sprintf("$%016llX", n);
         });
@@ -679,16 +711,31 @@ void HexEditDialog::printData(DataType type)
     }
     break;
 
+    case DataPython3Byte:
+    {
+        data += "b\"";
+        for(int i = 0; i < mData.size(); i++)
+        {
+            byte_t ch = mData.at(i);
+            data += QString().sprintf("\\x%02X", ch);
+        }
+        data += "\"";
+    }
+    break;
+
     case DataHexStream:
     {
         for(int i = 0; i < mData.size(); i++)
-            data += QString().sprintf("%02X", mData.constData()[i]);
+        {
+            byte_t ch = mData.at(i);
+            data += QString().sprintf("%02X", ch);
+        }
     }
     break;
 
     case DataGUID:
     {
-        data = formatLoop<GUID>(mData, mTypes[mIndex].itemsPerLine, [](GUID guid)
+        data = formatLoop<GUID>(mData, mTypes[mIndex], [](GUID guid)
         {
             return QString().sprintf("{%08X-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}", guid.Data1, guid.Data2, guid.Data3, guid.Data4[0], guid.Data4[1], guid.Data4[2], guid.Data4[3], guid.Data4[4], guid.Data4[5], guid.Data4[6], guid.Data4[7]);
         });
@@ -717,7 +764,7 @@ void HexEditDialog::printData(DataType type)
     {
         INETNTOPW InetNtopW;
         int numIPs = mData.size() / 16;
-        HMODULE hWinsock = LoadLibrary(L"ws2_32.dll");
+        HMODULE hWinsock = LoadLibraryW(L"ws2_32.dll");
         InetNtopW = INETNTOPW(GetProcAddress(hWinsock, "InetNtopW"));
         if(InetNtopW)
         {
@@ -791,6 +838,9 @@ void HexEditDialog::printData(DataType type)
     case DataSHA512_3:
         data = printHash(mData, QCryptographicHash::Sha3_512);
         break;
+
+    default:
+        break;
     }
     ui->editCode->setPlainText(data);
 }
@@ -801,6 +851,7 @@ void HexEditDialog::on_listType_currentRowChanged(int currentRow)
     mIndex = currentRow;
     ui->spinBox->setValue(mTypes[mIndex].itemsPerLine);
     printData(DataType(mIndex));
+    Config()->setUint("HexDump", "CopyDataType", currentRow);
 }
 
 void HexEditDialog::on_buttonCopy_clicked()
@@ -812,4 +863,20 @@ void HexEditDialog::on_spinBox_valueChanged(int value)
 {
     mTypes[mIndex].itemsPerLine = value;
     printData(DataType(mIndex));
+}
+
+void HexEditDialog::on_chkFromSelection_toggled(bool /*checked*/)
+{
+    updateSearchRangeLabel();
+}
+
+void HexEditDialog::updateSearchRangeLabel()
+{
+    // Only update if we have valid range data
+    if(mRangeStart == 0 && mRangeEnd == 0)
+        return;
+
+    const QString & text = ui->chkFromSelection->isChecked() ? mSearchRangeFromSelection : mSearchRangeFromStart;
+    if(ui->labelSearchRange)
+        ui->labelSearchRange->setText(text);
 }

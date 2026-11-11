@@ -1,15 +1,8 @@
-#ifndef PDBDIATYPES_H_
-#define PDBDIATYPES_H_
 #pragma once
 
 #include <string>
-#include <stdint.h>
-#include <set>
-#include <vector>
-#include <deque>
-#include <map>
+#include <cstdint>
 #include <windows.h>
-#include <functional>
 #include <string>
 
 enum class DiaSymbolType
@@ -51,33 +44,32 @@ enum class DiaCallingConvention
 
 struct DiaValidationData_t
 {
-    GUID guid;
-    uint32_t signature;
-    uint32_t age;
+    GUID guid = {};
+    uint32_t signature = 0;
+    uint32_t age = 0;
 };
 
 struct DiaSymbol_t
 {
-    DiaSymbolType type;
-    uint64_t virtualAddress;
-    uint64_t size;
-    uint32_t offset;
-    uint32_t disp;
-    uint32_t segment;
-    DiaReachableType reachable;
-    DiaReturnableType returnable;
-    DiaCallingConvention convention;
-    bool perfectSize;
-    bool publicSymbol;
+    DiaSymbolType type = DiaSymbolType::ANY;
+    uint64_t virtualAddress = 0;
+    uint64_t size = 0;
+    uint32_t offset = 0;
+    uint32_t disp = 0;
+    uint32_t segment = 0;
+    DiaReachableType reachable = DiaReachableType::UNKNOWN;
+    DiaReturnableType returnable = DiaReturnableType::UNKNOWN;
+    DiaCallingConvention convention = DiaCallingConvention::UNKNOWN;
+    bool perfectSize = false;
+    bool publicSymbol = false;
+    bool function = false;
     std::string name;
     std::string undecoratedName;
 };
 
 struct DiaLineInfo_t
 {
-    DWORD sourceFileId;
-    DWORD lineNumber;
-    DWORD rva;
+    DWORD sourceFileId = 0;
+    DWORD lineNumber = 0;
+    DWORD rva = 0;
 };
-
-#endif // PDBDIATYPES_H_

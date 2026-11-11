@@ -1,55 +1,38 @@
-#ifndef STRUCTWIDGET_H
-#define STRUCTWIDGET_H
+#pragma once
 
-#include <QWidget>
-#include "Bridge.h"
+#include "TypeWidget.h"
 #include "ActionHelpers.h"
 
-class MenuBuilder;
 class GotoDialog;
 
-namespace Ui
-{
-    class StructWidget;
-}
-
-class StructWidget : public QWidget, public ActionHelper<StructWidget>
+class StructWidget : public TypeWidget, public ActionHelper<StructWidget>
 {
     Q_OBJECT
 
 public:
-    explicit StructWidget(QWidget* parent = 0);
-    ~StructWidget();
-
-public slots:
-    void colorsUpdatedSlot();
-    void fontsUpdatedSlot();
-    void shortcutsUpdatedSlot();
-
-    void typeAddNode(void* parent, const TYPEDESCRIPTOR* type);
-    void typeClear();
-    void typeUpdateWidget();
-    void dbgStateChangedSlot(DBGSTATE state);
+    explicit StructWidget(QWidget* parent = nullptr);
 
 private:
-    Ui::StructWidget* ui;
-    MenuBuilder* mMenuBuilder;
+    MenuBuilder* mMenuBuilder = nullptr;
     GotoDialog* mGotoDialog = nullptr;
 
-    void setupColumns();
+    duint selectedValue() const;
     void setupContextMenu();
 
 private slots:
-    void on_treeWidget_customContextMenuRequested(const QPoint & pos);
-
+    void typeAddNodeSlot(void* parent, const TYPEDESCRIPTOR* type);
+    void typeClearSlot();
+    void typeVisitSlot(QString typeName, duint addr);
+    void dbgStateChangedSlot(DBGSTATE state);
+    void contextMenuRequestedSlot(const QPoint & pos);
     void followDumpSlot();
+    void followValueDumpSlot();
+    void followValueDisasmSlot();
     void clearSlot();
     void removeSlot();
-    void visitSlot();
+    void displayTypeSlot();
     void loadJsonSlot();
     void parseFileSlot();
-    void changeAddrSlot();
-    void refreshSlot();
+    void reloadTypeSlot();
+    void copyColumnSlot();
 };
-
-#endif // STRUCTWIDGET_H

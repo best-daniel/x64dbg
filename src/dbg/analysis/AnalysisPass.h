@@ -2,6 +2,7 @@
 
 #include "_global.h"
 #include "BasicBlock.h"
+#include <functional>
 
 class AnalysisPass
 {
@@ -19,14 +20,14 @@ protected:
     unsigned char* m_Data;
     BBlockArray & m_MainBlocks;
 
-    inline unsigned char* AnalysisPass::TranslateAddress(duint Address)
+    unsigned char* TranslateAddress(duint Address)
     {
         ASSERT_TRUE(ValidateAddress(Address));
 
         return &m_Data[Address - m_VirtualStart];
     }
 
-    inline bool AnalysisPass::ValidateAddress(duint Address)
+    bool ValidateAddress(duint Address)
     {
         return (Address >= m_VirtualStart && Address < m_VirtualEnd);
     }
@@ -35,7 +36,8 @@ protected:
     duint FindBBlockIndex(BasicBlock* Block);
     duint IdealThreadCount();
     void SetIdealThreadCount(duint Count);
+    void ParallelFor(duint ThreadCount, const std::function<void(duint)> & Worker);
 
 private:
-    BYTE m_InternalMaxThreads;
+    duint m_InternalMaxThreads;
 };

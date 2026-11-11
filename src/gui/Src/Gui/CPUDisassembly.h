@@ -1,51 +1,46 @@
-#ifndef CPUDISASSEMBLY_H
-#define CPUDISASSEMBLY_H
+#pragma once
 
 #include "Disassembly.h"
-#include "BreakpointMenu.h"
 
 // Needed forward declaration for parent container class
-class CPUWidget;
+class CPUSideBar;
 class GotoDialog;
 class XrefBrowseDialog;
+class CommonActions;
 
 class CPUDisassembly : public Disassembly
 {
     Q_OBJECT
 
 public:
-    explicit CPUDisassembly(CPUWidget* parent);
+    CPUDisassembly(Architecture* architecture, bool isMain, QWidget* parent = nullptr);
 
     // Mouse management
-    void contextMenuEvent(QContextMenuEvent* event);
-    void mousePressEvent(QMouseEvent* event);
-    void mouseDoubleClickEvent(QMouseEvent* event);
+    void contextMenuEvent(QContextMenuEvent* event) override;
+    void mousePressEvent(QMouseEvent* event) override;
+    void mouseDoubleClickEvent(QMouseEvent* event) override;
 
     // Context menu management
     void setupRightClickContextMenu();
-    void addFollowReferenceMenuItem(QString name, dsint value, QMenu* menu, bool isReferences, bool isFollowInCPU);
-    void setupFollowReferenceMenu(dsint wVA, QMenu* menu, bool isReferences, bool isFollowInCPU);
     void copySelectionSlot(bool copyBytes);
     void copySelectionToFileSlot(bool copyBytes);
+    void setSideBar(CPUSideBar* sideBar);
 
 signals:
     void displayReferencesWidget();
     void displaySourceManagerWidget();
     void showPatches();
-    void displaySnowmanWidget();
     void displayLogWidget();
-    void displayGraphWidget();
     void displaySymbolsWidget();
 
 public slots:
-    void setNewOriginHereActionSlot();
     void gotoOriginSlot();
     void setLabelSlot();
     void setLabelAddressSlot();
-    void setCommentSlot();
-    void setBookmarkSlot();
     void toggleFunctionSlot();
     void toggleArgumentSlot();
+    void addLoopSlot();
+    void deleteLoopSlot();
     void assembleSlot();
     void gotoExpressionSlot();
     void gotoFileOffsetSlot();
@@ -82,6 +77,7 @@ public slots:
     void copySelectionToFileSlot();
     void copySelectionNoBytesSlot();
     void copySelectionToFileNoBytesSlot();
+    void copySelectionBytesSlot();
     void copyAddressSlot();
     void copyRvaSlot();
     void copyFileOffsetSlot();
@@ -90,15 +86,14 @@ public slots:
     void labelCopySlot();
     void findCommandSlot();
     void openSourceSlot();
-    void decompileSelectionSlot();
-    void decompileFunctionSlot();
     void mnemonicHelpSlot();
     void mnemonicBriefSlot();
-    void ActionTraceRecordBitSlot();
-    void ActionTraceRecordByteSlot();
-    void ActionTraceRecordWordSlot();
-    void ActionTraceRecordDisableSlot();
-    void ActionTraceRecordToggleRunTraceSlot();
+    void traceCoverageBitSlot();
+    void traceCoverageByteSlot();
+    void traceCoverageWordSlot();
+    void traceCoverageResetSlot();
+    void traceCoverageDisableSlot();
+    void traceCoverageToggleTraceRecordingSlot();
     void displayWarningSlot(QString title, QString text);
     void labelHelpSlot();
     void analyzeSingleFunctionSlot();
@@ -106,27 +101,29 @@ public slots:
     void removeAnalysisModuleSlot();
     void setEncodeTypeSlot();
     void setEncodeTypeRangeSlot();
-    void graphSlot();
     void analyzeModuleSlot();
-    //void togglePreviewSlot();
-    void createThreadSlot();
     void copyTokenTextSlot();
     void copyTokenValueSlot();
-    void followInMemoryMapSlot();
     void downloadCurrentSymbolsSlot();
+    void setAddressColorSlot();
+    void clearAddressColorSlot();
 
 protected:
     void paintEvent(QPaintEvent* event) override;
 
 private:
+    int findDeepestLoopDepth(duint addr);
     bool getLabelsFromInstruction(duint addr, QSet<QString> & labels);
     bool getTokenValueText(QString & text);
 
     void pushSelectionInto(bool copyBytes, QTextStream & stream, QTextStream* htmlStream = nullptr);
 
+    void addFollowReferenceMenuItem(QString name, duint value, QMenu* menu, bool isReferences, bool isFollowInCPU);
+    void setupFollowReferenceMenu(duint va, QMenu* menu, bool isReferences, bool isFollowInCPU);
+
     // Menus
     QMenu* mHwSlotSelectMenu;
-    QMenu* mPluginMenu;
+    QMenu* mPluginMenu = nullptr;
 
     // Actions
     QAction* mReferenceSelectedAddressAction;
@@ -152,6 +149,20 @@ private:
     QAction* mFindPatternFunction;
     QAction* mFindGUIDFunction;
 
+    QAction* mFindCommandAllUser;
+    QAction* mFindConstantAllUser;
+    QAction* mFindStringsAllUser;
+    QAction* mFindCallsAllUser;
+    QAction* mFindPatternAllUser;
+    QAction* mFindGUIDAllUser;
+
+    QAction* mFindCommandAllSystem;
+    QAction* mFindConstantAllSystem;
+    QAction* mFindStringsAllSystem;
+    QAction* mFindCallsAllSystem;
+    QAction* mFindPatternAllSystem;
+    QAction* mFindGUIDAllSystem;
+
     QAction* mFindCommandAll;
     QAction* mFindConstantAll;
     QAction* mFindStringsAll;
@@ -159,18 +170,17 @@ private:
     QAction* mFindPatternAll;
     QAction* mFindGUIDAll;
 
+
     // Goto dialog specific
     GotoDialog* mGoto = nullptr;
     GotoDialog* mGotoOffset = nullptr;
     XrefBrowseDialog* mXrefDlg = nullptr;
 
     // Parent CPU window
-    CPUWidget* mParentCPUWindow;
+    CPUSideBar* mSideBar = nullptr;
 
     MenuBuilder* mMenuBuilder;
     MenuBuilder* mHighlightMenuBuilder;
     bool mHighlightContextMenu = false;
-    BreakpointMenu* mBreakpointMenu;
+    CommonActions* mCommonActions;
 };
-
-#endif // CPUDISASSEMBLY_H

@@ -1,12 +1,13 @@
 #include "encodemap.h"
 #include <unordered_map>
 #include "addrinfo.h"
+#include "database_cb_batcher.h"
 #include <zydis_wrapper.h>
 
 struct ENCODEMAP : AddrInfo
 {
     duint size;
-    byte* data;
+    uint8_t* data;
 };
 
 std::unordered_map<duint, duint> referenceCount;
@@ -63,7 +64,7 @@ struct EncodeMapSerializer : AddrInfoSerializer<ENCODEMAP>
         if(!StringUtils::FromCompressedHex(json_string_value(dataJson), data))
             return false;
         value.size = data.size();
-        value.data = (byte*)VirtualAlloc(NULL, value.size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        value.data = (uint8_t*)VirtualAlloc(NULL, value.size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
         if(!value.data)
             return false;
         memcpy(value.data, data.data(), data.size());
@@ -78,11 +79,41 @@ struct EncodeMap : AddrInfoHashMap<LockEncodeMaps, ENCODEMAP, EncodeMapSerialize
     {
         return "encodemaps";
     }
+
+protected:
+    bool populateDbOperation(DbOperation & op, const ENCODEMAP & value) const override // Encode maps don't have database notifications
+    {
+        return false;
+    }
 };
 
 static EncodeMap encmaps;
 
-static bool EncodeMapGetorCreate(duint addr, ENCODEMAP & map, bool* created = nullptr)
+static bool EncodeMapValidateModuleInfo(duint key, ENCODEMAP & map, duint segsize)
+{
+    // The map size might be smaller if it was loaded from cache for another
+    // version of the module. Adjust the size in this case.
+    if(map.size < segsize)
+    {
+        auto newData = (uint8_t*)VirtualAlloc(NULL, segsize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        if(newData == NULL) return false;
+
+        memcpy(newData, map.data, map.size);
+
+        if(DecreaseReferenceCount(map.data) == 0)
+            VirtualFree(map.data, 0, MEM_RELEASE);
+        encmaps.Delete(key);
+
+        map.size = segsize;
+        map.data = newData;
+        IncreaseReferenceCount(map.data);
+        encmaps.Add(map);
+    }
+
+    return true;
+}
+
+static bool EncodeMapGet(duint addr, ENCODEMAP & map, duint* baseOut = nullptr)
 {
     duint base, segsize;
 
@@ -90,13 +121,37 @@ static bool EncodeMapGetorCreate(duint addr, ENCODEMAP & map, bool* created = nu
     if(!base)
         return false;
 
+    if(baseOut)
+        *baseOut = base;
+
     duint key = EncodeMap::VaKey(base);
-    if(!encmaps.Contains(key))
+    if(!encmaps.Get(key, map))
+        return false;
+
+    if(!EncodeMapValidateModuleInfo(key, map, segsize))
+        return false;
+
+    return true;
+}
+
+static bool EncodeMapGetorCreate(duint addr, ENCODEMAP & map, duint* baseOut = nullptr, bool* created = nullptr)
+{
+    duint base, segsize;
+
+    base = MemFindBaseAddr(addr, &segsize);
+    if(!base)
+        return false;
+
+    if(baseOut)
+        *baseOut = base;
+
+    duint key = EncodeMap::VaKey(base);
+    if(!encmaps.Get(key, map))
     {
         if(created)
             *created = true;
         map.size = segsize;
-        map.data = (byte*)VirtualAlloc(NULL, segsize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        map.data = (uint8_t*)VirtualAlloc(NULL, segsize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
         if(map.data == NULL) return false;
         IncreaseReferenceCount(map.data);
         encmaps.PrepareValue(map, base, false);
@@ -104,7 +159,9 @@ static bool EncodeMapGetorCreate(duint addr, ENCODEMAP & map, bool* created = nu
     }
     else
     {
-        if(!encmaps.Get(key, map))
+        if(created)
+            *created = false;
+        if(!EncodeMapValidateModuleInfo(key, map, segsize))
             return false;
     }
     return true;
@@ -112,10 +169,9 @@ static bool EncodeMapGetorCreate(duint addr, ENCODEMAP & map, bool* created = nu
 
 void* EncodeMapGetBuffer(duint addr, duint* size, bool create)
 {
-    auto base = MemFindBaseAddr(addr);
-
     ENCODEMAP map;
-    if(create ? EncodeMapGetorCreate(addr, map) : encmaps.Get(EncodeMap::VaKey(base), map))
+    duint base;
+    if(create ? EncodeMapGetorCreate(addr, map, &base) : EncodeMapGet(addr, map, &base))
     {
         auto offset = addr - base;
         if(offset < map.size)
@@ -166,6 +222,8 @@ duint GetEncodeTypeSize(ENCODETYPE type)
         return 16;
     case enc_ymmword:
         return 32;
+    case enc_zmmword:
+        return 64;
     case enc_real4:
         return 4;
     case enc_real8:
@@ -188,11 +246,9 @@ static bool IsCodeType(ENCODETYPE type)
 
 ENCODETYPE EncodeMapGetType(duint addr, duint codesize)
 {
-    duint size;
-    auto base = MemFindBaseAddr(addr, &size);
-
     ENCODEMAP map;
-    if(base && encmaps.Get(EncodeMap::VaKey(base), map))
+    duint base;
+    if(EncodeMapGet(addr, map, &base))
     {
         auto offset = addr - base;
         if(offset >= map.size)
@@ -205,12 +261,9 @@ ENCODETYPE EncodeMapGetType(duint addr, duint codesize)
 
 duint EncodeMapGetSize(duint addr, duint codesize)
 {
-    auto base = MemFindBaseAddr(addr, nullptr);
-    if(!base)
-        return codesize;
-
     ENCODEMAP map;
-    if(encmaps.Get(EncodeMap::VaKey(base), map))
+    duint base;
+    if(EncodeMapGet(addr, map, &base))
     {
         auto offset = addr - base;
         if(offset >= map.size)
@@ -227,28 +280,23 @@ duint EncodeMapGetSize(duint addr, duint codesize)
 
 bool EncodeMapSetType(duint addr, duint size, ENCODETYPE type, bool* created)
 {
-    auto base = MemFindBaseAddr(addr, nullptr);
-    if(!base)
-        return false;
-
     ENCODEMAP map;
-    if(created)
-        *created = false;
-    if(!EncodeMapGetorCreate(base, map, created))
+    duint base;
+    if(!EncodeMapGetorCreate(addr, map, &base, created))
         return false;
     auto offset = addr - base;
-    size = min(map.size - offset, size);
+    size = std::min(map.size - offset, size);
     auto datasize = GetEncodeTypeSize(type);
     if(datasize == 1 && !IsCodeType(type))
     {
-        memset(map.data + offset, (byte)type, size);
+        memset(map.data + offset, (uint8_t)type, size);
     }
     else
     {
-        memset(map.data + offset, (byte)enc_middle, size);
+        memset(map.data + offset, (uint8_t)enc_middle, size);
         if(IsCodeType(type) && size > 1)
         {
-            Zydis cp;
+            Zydis zydis;
             Memory<unsigned char*> buffer(size);
             if(!MemRead(addr, buffer(), size))
                 return false;
@@ -256,9 +304,9 @@ bool EncodeMapSetType(duint addr, duint size, ENCODETYPE type, bool* created)
             duint buffersize = size, bufferoffset = 0, cmdsize;
             for(auto i = offset; i < offset + size;)
             {
-                map.data[i] = (byte)type;
-                cp.Disassemble(base + i, buffer() + bufferoffset, int(buffersize - bufferoffset));
-                cmdsize = cp.Success() ? cp.Size() : 1;
+                map.data[i] = (uint8_t)type;
+                zydis.Disassemble(base + i, buffer() + bufferoffset, int(buffersize - bufferoffset));
+                cmdsize = zydis.Success() ? zydis.Size() : 1;
                 i += cmdsize;
                 bufferoffset += cmdsize;
                 buffersize -= cmdsize;
@@ -267,7 +315,7 @@ bool EncodeMapSetType(duint addr, duint size, ENCODETYPE type, bool* created)
         else
         {
             for(auto i = offset; i < offset + size; i += datasize)
-                map.data[i] = (byte)type;
+                map.data[i] = (uint8_t)type;
         }
 
     }
@@ -275,7 +323,7 @@ bool EncodeMapSetType(duint addr, duint size, ENCODETYPE type, bool* created)
     for(auto i = offset + size + 1; i < map.size; i++)
     {
         if(map.data[i] == enc_middle)
-            map.data[i] = (byte)enc_unknown;
+            map.data[i] = (uint8_t)enc_unknown;
         else
             break;
     }
@@ -299,6 +347,8 @@ void EncodeMapDelSegment(duint Start)
 
 void EncodeMapDelRange(duint Start, duint End)
 {
+    if(End < Start)
+        return;
     EncodeMapSetType(Start, End - Start + 1, enc_unknown);
 }
 
@@ -309,14 +359,15 @@ void EncodeMapCacheSave(JSON Root)
 
 void EncodeMapCacheLoad(JSON Root)
 {
+    DbCallbackBatcher batcher(true);
     encmaps.CacheLoad(Root);
 }
 
-void EncodeMapClear()
+void EncodeMapClear(bool Terminating)
 {
     EXCLUSIVE_ACQUIRE(LockEncodeMaps);
     for(auto & encmap : encmaps.GetDataUnsafe())
         EncodeMapReleaseBuffer(encmap.second.data, false);
     EXCLUSIVE_RELEASE();
-    encmaps.Clear();
+    encmaps.Clear(Terminating);
 }

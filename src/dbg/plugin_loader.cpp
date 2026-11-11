@@ -7,58 +7,293 @@
 #include "plugin_loader.h"
 #include "console.h"
 #include "debugger.h"
+#include "module.h"
 #include "threading.h"
 #include "expressionfunctions.h"
 #include "formatfunctions.h"
 #include <algorithm>
 #include <shlwapi.h>
+#include <vector>
+
+#include "stringformat.h"
 
 /**
 \brief List of plugins.
 */
-static std::vector<PLUG_DATA> pluginList;
+static std::vector<PLUG_DATA> gPluginList;
 
 /**
 \brief Saved plugin directory
 */
-static std::wstring pluginDirectory;
+static std::wstring gPluginDirectory;
 
 /**
 \brief The current plugin handle.
 */
-static int curPluginHandle = 0;
+static int gCurPluginHandle = 1;
 
 /**
 \brief List of plugin callbacks.
 */
-static std::vector<PLUG_CALLBACK> pluginCallbackList[CB_LAST];
+static std::vector<PLUG_CALLBACK> gPluginCallbackList[CB_LAST];
 
 /**
 \brief List of plugin commands.
 */
-static std::vector<PLUG_COMMAND> pluginCommandList;
+static std::vector<PLUG_COMMAND> gPluginCommandList;
 
 /**
 \brief List of plugin menus.
 */
-static std::vector<PLUG_MENU> pluginMenuList;
+static std::vector<PLUG_MENU> gPluginMenuList;
 
 /**
 \brief List of plugin menu entries.
 */
-static std::vector<PLUG_MENUENTRY> pluginMenuEntryList;
+static std::vector<PLUG_MENUENTRY> gPluginMenuEntryList;
 
 /**
 \brief List of plugin exprfunctions.
 */
-static std::vector<PLUG_EXPRFUNCTION> pluginExprfunctionList;
+static std::vector<PLUG_EXPRFUNCTION> gPluginExprfunctionList;
 
 /**
 \brief List of plugin formatfunctions.
 */
-static std::vector<PLUG_FORMATFUNCTION> pluginFormatfunctionList;
+static std::vector<PLUG_FORMATFUNCTION> gPluginFormatfunctionList;
 
-static PLUG_DATA pluginData;
+/**
+\brief Global data for the plugin currently being loaded
+*/
+static PLUG_DATA gLoadingPlugin;
+
+/**
+\brief Extension for the plugin file
+*/
+static const wchar_t* gPluginExtension = ArchValue(L".dp32", L".dp64");
+
+/**
+/brief Normalizes the plugin name. Strips the extension and path.
+\param pluginName Can be name or partial plugin path.
+\return The normalized plugin name.
+ */
+static std::string pluginNormalizeName(std::string pluginName)
+{
+    auto pathPos = pluginName.find_last_of("\\/");
+    if(pathPos != std::string::npos)
+        pluginName = pluginName.substr(pathPos + 1);
+    auto extPos = pluginName.rfind(StringUtils::Utf16ToUtf8(gPluginExtension));
+    if(extPos != std::string::npos)
+        pluginName = pluginName.substr(0, extPos);
+    return pluginName;
+}
+
+static std::wstring trimTrailingSlashes(std::wstring path)
+{
+    while(path.size() > 1 && (path.back() == L'\\' || path.back() == L'/'))
+        path.pop_back();
+    return path;
+}
+
+static std::wstring pathBaseName(std::wstring path)
+{
+    path = trimTrailingSlashes(std::move(path));
+    auto pos = path.find_last_of(L"\\/");
+    if(pos == std::wstring::npos)
+        return path;
+    return path.substr(pos + 1);
+}
+
+static bool looksLikePluginPath(const std::string & pluginName)
+{
+    return pluginName.find('\\') != std::string::npos
+           || pluginName.find('/') != std::string::npos
+           || (pluginName.size() > 1 && pluginName[1] == ':');
+}
+
+static std::wstring absolutePath(const std::wstring & path)
+{
+    DWORD size = GetFullPathNameW(path.c_str(), 0, nullptr, nullptr);
+    if(size == 0)
+        return path;
+
+    std::wstring result(size, L'\0');
+    auto written = GetFullPathNameW(path.c_str(), size, &result[0], nullptr);
+    if(written == 0 || written >= size)
+        return path;
+
+    result.resize(written);
+    return result;
+}
+
+struct PLUGIN_LOCATION
+{
+    std::wstring pluginDirectory;
+    std::wstring pluginPath;
+    std::string normalizedName;
+    bool subdirPlugin = false;
+};
+
+static PLUGIN_LOCATION resolvePluginLocation(const char* pluginName)
+{
+    PLUGIN_LOCATION location;
+    location.normalizedName = pluginNormalizeName(pluginName);
+
+    if(looksLikePluginPath(pluginName))
+    {
+        auto candidate = absolutePath(StringUtils::Utf8ToUtf16(pluginName));
+        auto attributes = GetFileAttributesW(candidate.c_str());
+        if(attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+        {
+            candidate = trimTrailingSlashes(std::move(candidate));
+            auto baseName = pathBaseName(candidate);
+            location.pluginDirectory = candidate;
+            location.pluginPath = candidate + L"\\" + baseName + gPluginExtension;
+            location.subdirPlugin = true;
+        }
+        else
+        {
+            location.pluginPath = candidate;
+            auto pathPos = candidate.find_last_of(L"\\/");
+            if(pathPos == std::wstring::npos)
+                location.pluginDirectory = L".";
+            else
+                location.pluginDirectory = candidate.substr(0, pathPos);
+
+            auto extension = StringUtils::Utf16ToUtf8(gPluginExtension);
+            auto pluginPathUtf8 = StringUtils::Utf16ToUtf8(location.pluginPath);
+            if(pluginPathUtf8.size() < extension.size() || _stricmp(pluginPathUtf8.c_str() + pluginPathUtf8.size() - extension.size(), extension.c_str()) != 0)
+            {
+                auto pluginPathWithExtension = location.pluginPath + gPluginExtension;
+                if(PathFileExistsW(pluginPathWithExtension.c_str()))
+                    location.pluginPath = pluginPathWithExtension;
+            }
+        }
+        return location;
+    }
+
+    location.pluginDirectory = gPluginDirectory;
+    location.pluginPath = gPluginDirectory + L"\\" + StringUtils::Utf8ToUtf16(location.normalizedName);
+    auto pluginSubPath = location.pluginPath + L"\\" + StringUtils::Utf8ToUtf16(location.normalizedName) + gPluginExtension;
+    location.subdirPlugin = !!PathFileExistsW(pluginSubPath.c_str());
+    if(location.subdirPlugin)
+    {
+        location.pluginDirectory = location.pluginPath;
+        location.pluginPath = pluginSubPath;
+    }
+    else
+    {
+        location.pluginPath += gPluginExtension;
+    }
+
+    return location;
+}
+
+static void cleanupLoadingPlugin(int pluginHandle, bool callStop)
+{
+    if(callStop && gLoadingPlugin.plugstop)
+        gLoadingPlugin.plugstop();
+    plugincmdunregisterall(pluginHandle);
+    pluginexprfuncunregisterall(pluginHandle);
+    pluginformatfuncunregisterall(pluginHandle);
+    for(int i = CB_INITDEBUG; i < CB_LAST; i++)
+        pluginunregistercallback(pluginHandle, CBTYPE(i));
+    if(gLoadingPlugin.hPlugin)
+        FreeLibrary(gLoadingPlugin.hPlugin);
+    gLoadingPlugin = {};
+}
+
+static bool pluginImportsQtGui(const std::wstring & pluginPath)
+{
+    auto pluginPathUtf8 = StringUtils::Utf16ToUtf8(pluginPath);
+    auto info = MODINFO::load(0, 1, pluginPathUtf8.c_str(), false, nullptr, false);
+    if(!info)
+        return false;
+
+    return std::any_of(info->importModules.begin(), info->importModules.end(), [](const String & moduleName)
+    {
+        return _stricmp(moduleName.c_str(), "qt5widgets.dll") == 0
+               || _stricmp(moduleName.c_str(), "qt6widgets.dll") == 0
+               || _stricmp(moduleName.c_str(), "qt5quickwidgets.dll") == 0
+               || _stricmp(moduleName.c_str(), "qt6quickwidgets.dll") == 0
+               || _stricmp(moduleName.c_str(), "qt5quick.dll") == 0
+               || _stricmp(moduleName.c_str(), "qt6quick.dll") == 0;
+    });
+}
+
+struct ChangeDirectory
+{
+    ChangeDirectory(const ChangeDirectory &) = delete;
+    ChangeDirectory(ChangeDirectory &&) = delete;
+
+    explicit ChangeDirectory(const wchar_t* newDirectory)
+    {
+        GetCurrentDirectoryW(_countof(mPreviousDirectory), mPreviousDirectory);
+        SetCurrentDirectoryW(newDirectory);
+    }
+
+    ~ChangeDirectory()
+    {
+        SetCurrentDirectoryW(mPreviousDirectory);
+    }
+
+private:
+    wchar_t mPreviousDirectory[deflen] = {};
+};
+
+static void* addDllDirectory(const wchar_t* newDirectory)
+{
+    typedef PVOID(WINAPI * pfnAddDllDirectory)(LPCWSTR);
+    static auto pAddDllDirectory = (pfnAddDllDirectory)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "AddDllDirectory");
+    return pAddDllDirectory ? pAddDllDirectory(newDirectory) : nullptr;
+}
+
+static bool removeDllDirectory(void* cookie)
+{
+    typedef BOOL(WINAPI * pfnRemoveDllDirectory)(PVOID Cookie);
+    static auto pRemoveDllDirectory = (pfnRemoveDllDirectory)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "RemoveDllDirectory");
+    return pRemoveDllDirectory ? !!pRemoveDllDirectory(cookie) : false;
+}
+
+struct DllDirectory
+{
+    DllDirectory(const DllDirectory &) = delete;
+    DllDirectory(DllDirectory &&) = delete;
+
+    explicit DllDirectory(const wchar_t* directory)
+    {
+        if(directory != nullptr)
+        {
+            mCookie = addDllDirectory(directory);
+        }
+    }
+
+    ~DllDirectory()
+    {
+        if(mCookie != nullptr)
+        {
+            removeDllDirectory(mCookie);
+        }
+    }
+
+private:
+    void* mCookie = nullptr;
+};
+
+bool pluginisloaded(const char* pluginName)
+{
+    if(pluginName == nullptr || *pluginName == '\0')
+        return false;
+
+    const auto normalizedName = pluginNormalizeName(pluginName);
+    SHARED_ACQUIRE(LockPluginList);
+    for(const auto & plugin : gPluginList)
+    {
+        if(_stricmp(plugin.plugname, normalizedName.c_str()) == 0)
+            return true;
+    }
+    return false;
+}
 
 /**
 \brief Loads a plugin from the plugin directory.
@@ -68,118 +303,105 @@ static PLUG_DATA pluginData;
 */
 bool pluginload(const char* pluginName, bool loadall)
 {
-    //no empty plugin names allowed
-    if(!pluginName)
+    // No empty plugin names allowed
+    if(pluginName == nullptr || *pluginName == '\0')
         return false;
 
-    char name[MAX_PATH] = "";
-    strncpy_s(name, pluginName, _TRUNCATE);
+    // Normalize and resolve the plugin location.
+    auto location = resolvePluginLocation(pluginName);
+    auto normalizedName = location.normalizedName;
+    auto pluginDirectory = location.pluginDirectory;
+    auto pluginPath = location.pluginPath;
+    auto subdirPlugin = location.subdirPlugin;
 
-    if(!loadall)
-#ifdef _WIN64
-        strncat_s(name, ".dp64", _TRUNCATE);
-#else
-        strncat_s(name, ".dp32", _TRUNCATE);
-#endif
-
-    wchar_t currentDir[deflen] = L"";
-    if(!loadall)
+    // Check to see if this plugin is already loaded
+    EXCLUSIVE_ACQUIRE(LockPluginList);
+    for(auto & plugin : gPluginList)
     {
-        GetCurrentDirectoryW(deflen, currentDir);
-        SetCurrentDirectoryW(pluginDirectory.c_str());
-    }
-    char searchName[deflen] = "";
-#ifdef _WIN64
-    sprintf_s(searchName, "%s\\%s", StringUtils::Utf16ToUtf8(pluginDirectory.c_str()).c_str(), name);
-#else
-    sprintf_s(searchName, "%s\\%s", StringUtils::Utf16ToUtf8(pluginDirectory.c_str()).c_str(), name);
-#endif // _WIN64
-
-    //Check to see if this plugin is already loaded
-    if(!loadall)
-    {
-        EXCLUSIVE_ACQUIRE(LockPluginList);
-        for(auto it = pluginList.begin(); it != pluginList.end(); ++it)
+        if(_stricmp(plugin.plugname, normalizedName.c_str()) == 0)
         {
-            if(_stricmp(it->plugname, name) == 0 && it->isLoaded)
-            {
-                dprintf(QT_TRANSLATE_NOOP("DBG", "[PLUGIN] %s already loaded\n"), name);
-                SetCurrentDirectoryW(currentDir);
-                return false;
-            }
+            dprintf(QT_TRANSLATE_NOOP("DBG", "[PLUGIN] %s already loaded\n"), plugin.plugname);
+            return false;
         }
     }
 
-    //check if the file exists
-    if(!loadall && !PathFileExistsW(StringUtils::Utf8ToUtf16(searchName).c_str()))
+    // Check if the file exists
+    if(!PathFileExistsW(pluginPath.c_str()))
     {
-        dprintf(QT_TRANSLATE_NOOP("DBG", "[PLUGIN] Cannot find plugin: %s\n"), name);
+        dprintf(QT_TRANSLATE_NOOP("DBG", "[PLUGIN] Cannot find plugin: %s\n"), StringUtils::Utf16ToUtf8(pluginPath).c_str());
         return false;
     }
 
-    //setup plugin data
-    memset(&pluginData, 0, sizeof(pluginData));
-    pluginData.initStruct.pluginHandle = curPluginHandle;
-    pluginData.hPlugin = LoadLibraryW(StringUtils::Utf8ToUtf16(searchName).c_str()); //load the plugin library
-    if(!pluginData.hPlugin)
+    if(BridgeIsHeadless() && pluginImportsQtGui(pluginPath))
     {
-        dprintf(QT_TRANSLATE_NOOP("DBG", "[PLUGIN] Failed to load plugin: %s\n"), name);
-        SetCurrentDirectoryW(currentDir);
-        return false;
-    }
-    pluginData.pluginit = (PLUGINIT)GetProcAddress(pluginData.hPlugin, "pluginit");
-    if(!pluginData.pluginit)
-    {
-        dprintf(QT_TRANSLATE_NOOP("DBG", "[PLUGIN] Export \"pluginit\" not found in plugin: %s\n"), name);
-        for(int i = CB_INITDEBUG; i < CB_LAST; i++)
-            pluginunregistercallback(curPluginHandle, CBTYPE(i));
-        FreeLibrary(pluginData.hPlugin);
-        SetCurrentDirectoryW(currentDir);
-        return false;
-    }
-    pluginData.plugstop = (PLUGSTOP)GetProcAddress(pluginData.hPlugin, "plugstop");
-    pluginData.plugsetup = (PLUGSETUP)GetProcAddress(pluginData.hPlugin, "plugsetup");
-
-    strncpy_s(pluginData.plugpath, searchName, MAX_PATH);
-    strncpy_s(pluginData.plugname, name, MAX_PATH);
-
-    //init plugin
-    if(!pluginData.pluginit(&pluginData.initStruct))
-    {
-        dprintf(QT_TRANSLATE_NOOP("DBG", "[PLUGIN] pluginit failed for plugin: %s\n"), name);
-        for(int i = CB_INITDEBUG; i < CB_LAST; i++)
-            pluginunregistercallback(curPluginHandle, CBTYPE(i));
-        FreeLibrary(pluginData.hPlugin);
-        SetCurrentDirectoryW(currentDir);
-        return false;
-    }
-    if(pluginData.initStruct.sdkVersion < PLUG_SDKVERSION) //the plugin SDK is not compatible
-    {
-        dprintf(QT_TRANSLATE_NOOP("DBG", "[PLUGIN] %s is incompatible with this SDK version\n"), pluginData.initStruct.pluginName);
-        for(int i = CB_INITDEBUG; i < CB_LAST; i++)
-            pluginunregistercallback(curPluginHandle, CBTYPE(i));
-        FreeLibrary(pluginData.hPlugin);
-        SetCurrentDirectoryW(currentDir);
+        dprintf(QT_TRANSLATE_NOOP("DBG", "[PLUGIN] Skipping GUI plugin in headless mode (Qt GUI imports detected): %s\n"), normalizedName.c_str());
         return false;
     }
 
-    dprintf(QT_TRANSLATE_NOOP("DBG", "[PLUGIN] %s v%d Loaded!\n"), pluginData.initStruct.pluginName, pluginData.initStruct.pluginVersion);
+    // Set the working and DLL load directories
+    ChangeDirectory cd(pluginDirectory.c_str());
+    DllDirectory dd(loadall && !subdirPlugin ? nullptr : pluginDirectory.c_str());
 
-    //auto-register callbacks for certain export names
-    auto cbPlugin = CBPLUGIN(GetProcAddress(pluginData.hPlugin, "CBALLEVENTS"));
+    // Setup plugin data
+    // NOTE: This is a global because during registration the plugin
+    // isn't in the gPluginList yet
+    auto pluginHandle = gCurPluginHandle++;
+    gLoadingPlugin = {};
+    gLoadingPlugin.initStruct.pluginHandle = pluginHandle;
+    gLoadingPlugin.hPlugin = LoadLibraryW(pluginPath.c_str()); //load the plugin library
+    if(!gLoadingPlugin.hPlugin)
+    {
+        String error = StringUtils::sprintf("%s (%s)", normalizedName.c_str(), stringformatinline(StringUtils::sprintf("{winerror@%x}", GetLastError())).c_str());
+        dprintf(QT_TRANSLATE_NOOP("DBG", "[PLUGIN] Failed to load plugin: %s\n"), error.c_str());
+        return false;
+    }
+    gLoadingPlugin.pluginit = (PLUGINIT)GetProcAddress(gLoadingPlugin.hPlugin, "pluginit");
+    if(!gLoadingPlugin.pluginit)
+    {
+        dprintf(QT_TRANSLATE_NOOP("DBG", "[PLUGIN] Export \"pluginit\" not found in plugin: %s\n"), normalizedName.c_str());
+        cleanupLoadingPlugin(pluginHandle, false);
+        return false;
+    }
+    gLoadingPlugin.plugstop = (PLUGSTOP)GetProcAddress(gLoadingPlugin.hPlugin, "plugstop");
+    gLoadingPlugin.plugsetup = (PLUGSETUP)GetProcAddress(gLoadingPlugin.hPlugin, "plugsetup");
+
+    strncpy_s(gLoadingPlugin.plugpath, StringUtils::Utf16ToUtf8(pluginPath).c_str(), _TRUNCATE);
+    strncpy_s(gLoadingPlugin.plugname, normalizedName.c_str(), _TRUNCATE);
+    strncpy_s(gLoadingPlugin.initStruct.pluginName, normalizedName.c_str(), _TRUNCATE);
+
+    // Init plugin
+    if(!gLoadingPlugin.pluginit(&gLoadingPlugin.initStruct))
+    {
+        dprintf(QT_TRANSLATE_NOOP("DBG", "[PLUGIN] pluginit failed for plugin: %s\n"), normalizedName.c_str());
+        cleanupLoadingPlugin(pluginHandle, false);
+        return false;
+    }
+
+    if(gLoadingPlugin.initStruct.sdkVersion != PLUG_SDKVERSION)
+    {
+        dprintf(QT_TRANSLATE_NOOP("DBG", "[PLUGIN] %s is incompatible with this SDK version\n"), gLoadingPlugin.initStruct.pluginName);
+        cleanupLoadingPlugin(pluginHandle, true);
+        return false;
+    }
+
+    dprintf(QT_TRANSLATE_NOOP("DBG", "[PLUGIN] %s v%d Loaded!\n"), gLoadingPlugin.initStruct.pluginName, gLoadingPlugin.initStruct.pluginVersion);
+
+    // Auto-register callbacks for certain export names
+    auto cbPlugin = CBPLUGIN(GetProcAddress(gLoadingPlugin.hPlugin, "CBALLEVENTS"));
     if(cbPlugin)
     {
         for(int i = CB_INITDEBUG; i < CB_LAST; i++)
-            pluginregistercallback(curPluginHandle, CBTYPE(i), cbPlugin);
+            pluginregistercallback(pluginHandle, CBTYPE(i), cbPlugin);
     }
-    auto regExport = [](const char* exportname, CBTYPE cbType)
+    auto regExport = [pluginHandle](const char* exportname, CBTYPE cbType)
     {
-        auto cbPlugin = CBPLUGIN(GetProcAddress(pluginData.hPlugin, exportname));
+        auto cbPlugin = CBPLUGIN(GetProcAddress(gLoadingPlugin.hPlugin, exportname));
         if(cbPlugin)
-            pluginregistercallback(curPluginHandle, cbType, cbPlugin);
+            pluginregistercallback(pluginHandle, cbType, cbPlugin);
     };
     regExport("CBINITDEBUG", CB_INITDEBUG);
     regExport("CBSTOPDEBUG", CB_STOPDEBUG);
+    regExport("CBSTOPPINGDEBUG", CB_STOPPINGDEBUG);
     regExport("CBCREATEPROCESS", CB_CREATEPROCESS);
     regExport("CBEXITPROCESS", CB_EXITPROCESS);
     regExport("CBCREATETHREAD", CB_CREATETHREAD);
@@ -203,104 +425,70 @@ bool pluginload(const char* pluginName, bool loadall)
     regExport("CBSAVEDB", CB_SAVEDB);
     regExport("CBFILTERSYMBOL", CB_FILTERSYMBOL);
     regExport("CBTRACEEXECUTE", CB_TRACEEXECUTE);
+    regExport("CBSELCHANGED", CB_SELCHANGED);
     regExport("CBANALYZE", CB_ANALYZE);
     regExport("CBADDRINFO", CB_ADDRINFO);
     regExport("CBVALFROMSTRING", CB_VALFROMSTRING);
     regExport("CBVALTOSTRING", CB_VALTOSTRING);
     regExport("CBMENUPREPARE", CB_MENUPREPARE);
+    regExport("CBDBOPERATION", CB_DBOPERATION);
 
-    SectionLocker<LockPluginMenuList, false> menuLock; //exclusive lock
+    // Add plugin menus
+    {
+        ExclusiveSectionLocker<LockPluginMenuList> menuLock;
 
-    //add plugin menu
-    int hNewMenu = GuiMenuAdd(GUI_PLUGIN_MENU, pluginData.initStruct.pluginName);
-    if(hNewMenu == -1)
-    {
-        dprintf(QT_TRANSLATE_NOOP("DBG", "[PLUGIN] GuiMenuAdd(GUI_PLUGIN_MENU) failed for plugin: %s\n"), pluginData.initStruct.pluginName);
-        pluginData.hMenu = -1;
-    }
-    else
-    {
-        PLUG_MENU newMenu;
-        newMenu.hEntryMenu = hNewMenu;
-        newMenu.hParentMenu = GUI_PLUGIN_MENU;
-        newMenu.pluginHandle = pluginData.initStruct.pluginHandle;
-        pluginMenuList.push_back(newMenu);
-        pluginData.hMenu = newMenu.hEntryMenu;
-    }
+        auto addPluginMenu = [](GUIMENUTYPE type)
+        {
+            int hNewMenu = GuiMenuAdd(type, gLoadingPlugin.initStruct.pluginName);
+            if(hNewMenu == -1)
+            {
+                dprintf(QT_TRANSLATE_NOOP("DBG", "[PLUGIN] GuiMenuAdd(%d) failed for plugin: %s\n"), type, gLoadingPlugin.initStruct.pluginName);
+                return -1;
+            }
+            else
+            {
+                PLUG_MENU newMenu;
+                newMenu.hEntryMenu = hNewMenu;
+                newMenu.hParentMenu = type;
+                newMenu.pluginHandle = gLoadingPlugin.initStruct.pluginHandle;
+                gPluginMenuList.push_back(newMenu);
+                return newMenu.hEntryMenu;
+            }
+        };
 
-    //add disasm plugin menu
-    hNewMenu = GuiMenuAdd(GUI_DISASM_MENU, pluginData.initStruct.pluginName);
-    if(hNewMenu == -1)
-    {
-        dprintf(QT_TRANSLATE_NOOP("DBG", "[PLUGIN] GuiMenuAdd(GUI_DISASM_MENU) failed for plugin: %s\n"), pluginData.initStruct.pluginName);
-        pluginData.hMenu = -1;
-    }
-    else
-    {
-        PLUG_MENU newMenu;
-        newMenu.hEntryMenu = hNewMenu;
-        newMenu.hParentMenu = GUI_DISASM_MENU;
-        newMenu.pluginHandle = pluginData.initStruct.pluginHandle;
-        pluginMenuList.push_back(newMenu);
-        pluginData.hMenuDisasm = newMenu.hEntryMenu;
+        gLoadingPlugin.hMenu = addPluginMenu(GUI_PLUGIN_MENU);
+        gLoadingPlugin.hMenuDisasm = addPluginMenu(GUI_DISASM_MENU);
+        gLoadingPlugin.hMenuDump = addPluginMenu(GUI_DUMP_MENU);
+        gLoadingPlugin.hMenuStack = addPluginMenu(GUI_STACK_MENU);
+        gLoadingPlugin.hMenuGraph = addPluginMenu(GUI_GRAPH_MENU);
+        gLoadingPlugin.hMenuMemmap = addPluginMenu(GUI_MEMMAP_MENU);
+        gLoadingPlugin.hMenuSymmod = addPluginMenu(GUI_SYMMOD_MENU);
     }
 
-    //add dump plugin menu
-    hNewMenu = GuiMenuAdd(GUI_DUMP_MENU, pluginData.initStruct.pluginName);
-    if(hNewMenu == -1)
+    // Add the plugin to the list
     {
-        dprintf(QT_TRANSLATE_NOOP("DBG", "[PLUGIN] GuiMenuAdd(GUI_DUMP_MENU) failed for plugin: %s\n"), pluginData.initStruct.pluginName);
-        pluginData.hMenu = -1;
-    }
-    else
-    {
-        PLUG_MENU newMenu;
-        newMenu.hEntryMenu = hNewMenu;
-        newMenu.hParentMenu = GUI_DUMP_MENU;
-        newMenu.pluginHandle = pluginData.initStruct.pluginHandle;
-        pluginMenuList.push_back(newMenu);
-        pluginData.hMenuDump = newMenu.hEntryMenu;
+        ExclusiveSectionLocker<LockPluginList> pluginLock;
+        gPluginList.push_back(gLoadingPlugin);
     }
 
-    //add stack plugin menu
-    hNewMenu = GuiMenuAdd(GUI_STACK_MENU, pluginData.initStruct.pluginName);
-    if(hNewMenu == -1)
-    {
-        dprintf(QT_TRANSLATE_NOOP("DBG", "[PLUGIN] GuiMenuAdd(GUI_STACK_MENU) failed for plugin: %s\n"), pluginData.initStruct.pluginName);
-        pluginData.hMenu = -1;
-    }
-    else
-    {
-        PLUG_MENU newMenu;
-        newMenu.hEntryMenu = hNewMenu;
-        newMenu.hParentMenu = GUI_STACK_MENU;
-        newMenu.pluginHandle = pluginData.initStruct.pluginHandle;
-        pluginMenuList.push_back(newMenu);
-        pluginData.hMenuStack = newMenu.hEntryMenu;
-    }
-    menuLock.Unlock();
-
-    //add the plugin to the list
-    SectionLocker<LockPluginList, false> pluginLock; //exclusive lock
-    pluginList.push_back(pluginData);
-    pluginLock.Unlock();
-
-    //setup plugin
-    if(pluginData.plugsetup)
+    // Setup plugin
+    if(gLoadingPlugin.plugsetup)
     {
         PLUG_SETUPSTRUCT setupStruct;
         setupStruct.hwndDlg = GuiGetWindowHandle();
-        setupStruct.hMenu = pluginData.hMenu;
-        setupStruct.hMenuDisasm = pluginData.hMenuDisasm;
-        setupStruct.hMenuDump = pluginData.hMenuDump;
-        setupStruct.hMenuStack = pluginData.hMenuStack;
-        pluginData.plugsetup(&setupStruct);
+        setupStruct.hMenu = gLoadingPlugin.hMenu;
+        setupStruct.hMenuDisasm = gLoadingPlugin.hMenuDisasm;
+        setupStruct.hMenuDump = gLoadingPlugin.hMenuDump;
+        setupStruct.hMenuStack = gLoadingPlugin.hMenuStack;
+        setupStruct.hMenuGraph = gLoadingPlugin.hMenuGraph;
+        setupStruct.hMenuMemmap = gLoadingPlugin.hMenuMemmap;
+        setupStruct.hMenuSymmod = gLoadingPlugin.hMenuSymmod;
+        gLoadingPlugin.plugsetup(&setupStruct);
     }
-    pluginData.isLoaded = true;
-    curPluginHandle++;
 
-    if(!loadall)
-        SetCurrentDirectoryW(currentDir);
+    // Clear the loading plugin structure (since it's now in the plugin list)
+    gLoadingPlugin = {};
+
     return true;
 }
 
@@ -312,41 +500,43 @@ bool pluginload(const char* pluginName, bool loadall)
 */
 bool pluginunload(const char* pluginName, bool unloadall)
 {
-    char name[MAX_PATH] = "";
-    strncpy_s(name, pluginName, _TRUNCATE);
+    // Normalize the plugin name.
+    std::string name = pluginNormalizeName(pluginName);
 
-    if(!unloadall)
-#ifdef _WIN64
-        strncat_s(name, ".dp64", _TRUNCATE);
-#else
-        strncat_s(name, ".dp32", _TRUNCATE);
-#endif
-
-    auto found = pluginList.end();
+    auto found = gPluginList.end();
     {
         EXCLUSIVE_ACQUIRE(LockPluginList);
-        found = std::find_if(pluginList.begin(), pluginList.end(), [&name](const PLUG_DATA & a)
+        found = std::find_if(gPluginList.begin(), gPluginList.end(), [&name](const PLUG_DATA & a)
         {
-            return _stricmp(a.plugname, name) == 0;
+            return _stricmp(a.plugname, name.c_str()) == 0;
         });
     }
 
-    if(found != pluginList.end())
+    // Will contain the actual plugin name if found.
+    std::string actualName = name;
+
+    if(found != gPluginList.end())
     {
+        bool canFreeLibrary = true;
         auto currentPlugin = *found;
         if(currentPlugin.plugstop)
-            currentPlugin.plugstop();
-        plugincmdunregisterall(currentPlugin.initStruct.pluginHandle);
-        pluginexprfuncunregisterall(currentPlugin.initStruct.pluginHandle);
+            canFreeLibrary = currentPlugin.plugstop();
+        int pluginHandle = currentPlugin.initStruct.pluginHandle;
+        plugincmdunregisterall(pluginHandle);
+        pluginexprfuncunregisterall(pluginHandle);
+        pluginformatfuncunregisterall(pluginHandle);
+
+        // Copy the actual name.
+        actualName = currentPlugin.plugname;
 
         //remove the callbacks
         {
             EXCLUSIVE_ACQUIRE(LockPluginCallbackList);
-            for(auto & cbList : pluginCallbackList)
+            for(auto & cbList : gPluginCallbackList)
             {
                 for(auto it = cbList.begin(); it != cbList.end();)
                 {
-                    if(it->pluginHandle == currentPlugin.initStruct.pluginHandle)
+                    if(it->pluginHandle == pluginHandle)
                         it = cbList.erase(it);
                     else
                         ++it;
@@ -356,56 +546,145 @@ bool pluginunload(const char* pluginName, bool unloadall)
         {
             EXCLUSIVE_ACQUIRE(LockPluginList);
             pluginmenuclear(currentPlugin.hMenu, true);
+            pluginmenuclear(currentPlugin.hMenuDisasm, true);
+            pluginmenuclear(currentPlugin.hMenuDump, true);
+            pluginmenuclear(currentPlugin.hMenuStack, true);
+            pluginmenuclear(currentPlugin.hMenuGraph, true);
+            pluginmenuclear(currentPlugin.hMenuMemmap, true);
+            pluginmenuclear(currentPlugin.hMenuSymmod, true);
 
             if(!unloadall)
             {
                 //remove from main pluginlist. We do this so unloadall doesn't try to unload an already released plugin
-                pluginList.erase(found);
+                gPluginList.erase(found);
             }
         }
 
-        FreeLibrary(currentPlugin.hPlugin);
-        dprintf(QT_TRANSLATE_NOOP("DBG", "[PLUGIN] %s unloaded\n"), name);
+        if(canFreeLibrary)
+            FreeLibrary(currentPlugin.hPlugin);
+        dprintf(QT_TRANSLATE_NOOP("DBG", "[PLUGIN] %s unloaded\n"), actualName.c_str());
         return true;
     }
-    dprintf(QT_TRANSLATE_NOOP("DBG", "[PLUGIN] %s not found\n"), name);
+    dprintf(QT_TRANSLATE_NOOP("DBG", "[PLUGIN] %s not found\n"), actualName.c_str());
     return false;
+}
+
+// Returns a list of all available plugins in the specified directory without the extension.
+static std::vector<std::wstring> enumerateAvailablePlugins(const std::wstring & pluginDir)
+{
+    std::vector<std::wstring> result;
+
+    const std::wstring pluginExt = gPluginExtension;
+
+    wchar_t searchQuery[deflen] = L"";
+    swprintf_s(searchQuery, L"%s\\*", pluginDir.c_str());
+
+    WIN32_FIND_DATAW foundData;
+    HANDLE hSearch = FindFirstFileW(searchQuery, &foundData);
+    if(hSearch == INVALID_HANDLE_VALUE)
+    {
+        return result;
+    }
+
+    const auto stripExtension = [](const std::wstring & fileName) -> std::wstring
+    {
+        size_t pos = fileName.find_last_of(L'.');
+        if(pos == std::wstring::npos)
+        {
+            return fileName;
+        }
+        return fileName.substr(0, pos);
+    };
+
+    do
+    {
+        // Check if directory
+        if(foundData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+        {
+            // Check if plugin exists with the same name as the directory
+            wchar_t pluginName[deflen] = L"";
+            swprintf_s(pluginName, L"%s\\%s%s", foundData.cFileName, foundData.cFileName, pluginExt.c_str());
+
+            wchar_t pluginPath[deflen] = L"";
+            swprintf_s(pluginPath, L"%s\\%s", pluginDir.c_str(), pluginName);
+
+            if(PathFileExistsW(pluginPath))
+            {
+                result.push_back(foundData.cFileName);
+            }
+        }
+        else
+        {
+            // Check if filename ends with the extension
+            wchar_t* extPos = wcsstr(foundData.cFileName, pluginExt.c_str());
+            if(extPos == nullptr)
+            {
+                continue;
+            }
+
+            // Ensure that the extension is at the end of the filename
+            if(extPos[pluginExt.size()] != L'\0')
+            {
+                continue;
+            }
+
+            auto pluginName = stripExtension(foundData.cFileName);
+            auto pluginFolderPath = pluginDir + L"\\" + pluginName + L"\\" + pluginName + gPluginExtension;
+            if(PathFileExistsW(pluginFolderPath.c_str()))
+            {
+                dprintf(QT_TRANSLATE_NOOP("DBG", "[PLUGIN] Ignoring top-level plugin in favor of the directory 'plugins\\%s'\n"), StringUtils::Utf16ToUtf8(pluginName).c_str());
+            }
+            else
+            {
+                result.push_back(pluginName);
+            }
+        }
+    }
+    while(FindNextFileW(hSearch, &foundData));
+
+    FindClose(hSearch);
+
+    // Sort the list of plugins.
+    std::sort(result.begin(), result.end());
+
+    return result;
+}
+
+void pluginsetdirectory(const char* pluginDir)
+{
+    gPluginDirectory = pluginDir ? StringUtils::Utf8ToUtf16(pluginDir) : std::wstring();
 }
 
 /**
 \brief Loads plugins from a specified directory.
 \param pluginDir The directory to load plugins from.
 */
-void pluginloadall(const char* pluginDir)
+void pluginloadall()
 {
     //reserve menu space
-    pluginMenuList.reserve(1024);
-    pluginMenuEntryList.reserve(1024);
+    gPluginMenuList.reserve(1024);
+    gPluginMenuEntryList.reserve(1024);
+
     //load new plugins
     wchar_t currentDir[deflen] = L"";
-    pluginDirectory = StringUtils::Utf8ToUtf16(pluginDir);
-    GetCurrentDirectoryW(deflen, currentDir);
-    SetCurrentDirectoryW(pluginDirectory.c_str());
-    char searchName[deflen] = "";
-#ifdef _WIN64
-    sprintf_s(searchName, "%s\\*.dp64", pluginDir);
-#else
-    sprintf_s(searchName, "%s\\*.dp32", pluginDir);
-#endif // _WIN64
-    WIN32_FIND_DATAW foundData;
-    HANDLE hSearch = FindFirstFileW(StringUtils::Utf8ToUtf16(searchName).c_str(), &foundData);
-    if(hSearch == INVALID_HANDLE_VALUE)
+
+    // Enumerate all plugins from plugins directory.
+    const auto availablePlugins = enumerateAvailablePlugins(gPluginDirectory);
+
+    // Add the plugins directory as valid dependency directory
+    auto pluginDirectoryCookie = addDllDirectory(gPluginDirectory.c_str());
+
+    for(const std::wstring & pluginName : availablePlugins)
     {
-        SetCurrentDirectoryW(currentDir);
-        return;
+        dprintf("[pluginload] %S\n", pluginName.c_str());
+        pluginload(StringUtils::Utf16ToUtf8(pluginName).c_str(), true);
     }
-    do
+
+    // Remove the plugins directory after loading finished
+    if(pluginDirectoryCookie != nullptr)
     {
-        pluginload(StringUtils::Utf16ToUtf8(foundData.cFileName).c_str(), true);
+        removeDllDirectory(pluginDirectoryCookie);
     }
-    while(FindNextFileW(hSearch, &foundData));
-    FindClose(hSearch);
-    SetCurrentDirectoryW(currentDir);
 }
 
 /**
@@ -413,10 +692,22 @@ void pluginloadall(const char* pluginDir)
 */
 void pluginunloadall()
 {
-    EXCLUSIVE_ACQUIRE(LockPluginList);
-    for(const auto & plugin : pluginList)
+    // Get a copy of the list of thread-safety reasons.
+    const auto pluginListCopy = []()
+    {
+        SHARED_ACQUIRE(LockPluginList);
+        return gPluginList;
+    }
+    ();
+
+    // Unload all plugins.
+    for(const auto & plugin : pluginListCopy)
         pluginunload(plugin.plugname, true);
-    pluginList.clear();
+
+    // Remove all plugins from the list.
+    SHARED_ACQUIRE(LockPluginList);
+    gPluginList.clear();
+    SHARED_RELEASE();
 }
 
 /**
@@ -426,16 +717,40 @@ void pluginunloadall()
 void plugincmdunregisterall(int pluginHandle)
 {
     SHARED_ACQUIRE(LockPluginCommandList);
-    auto commandList = pluginCommandList; //copy for thread-safety reasons
+    auto commandList = gPluginCommandList; //copy for thread-safety reasons
     SHARED_RELEASE();
-    auto i = commandList.begin();
-    while(i != commandList.end())
+    for(auto itr = commandList.begin(); itr != commandList.end();)
     {
-        auto currentCommand = *i;
+        auto currentCommand = *itr;
         if(currentCommand.pluginHandle == pluginHandle)
         {
-            i = commandList.erase(i);
+            itr = commandList.erase(itr);
             dbgcmddel(currentCommand.command);
+        }
+        else
+        {
+            ++itr;
+        }
+    }
+}
+
+/**
+\brief Unregister all plugin expression functions.
+\param pluginHandle Handle of the plugin to remove the expression functions from.
+*/
+void pluginexprfuncunregisterall(int pluginHandle)
+{
+    SHARED_ACQUIRE(LockPluginExprfunctionList);
+    auto exprFuncList = gPluginExprfunctionList; //copy for thread-safety reasons
+    SHARED_RELEASE();
+    auto i = exprFuncList.begin();
+    while(i != exprFuncList.end())
+    {
+        auto currentExprFunc = *i;
+        if(currentExprFunc.pluginHandle == pluginHandle)
+        {
+            i = exprFuncList.erase(i);
+            ExpressionFunctions::Unregister(currentExprFunc.name);
         }
         else
             ++i;
@@ -443,22 +758,22 @@ void plugincmdunregisterall(int pluginHandle)
 }
 
 /**
-\brief Unregister all plugin expression functions.
-\param pluginHandle Handle of the plugin to remove the commands from.
+\brief Unregister all plugin format functions.
+\param pluginHandle Handle of the plugin to remove the format functions from.
 */
-void pluginexprfuncunregisterall(int pluginHandle)
+void pluginformatfuncunregisterall(int pluginHandle)
 {
-    SHARED_ACQUIRE(LockPluginExprfunctionList);
-    auto commandList = pluginExprfunctionList; //copy for thread-safety reasons
+    SHARED_ACQUIRE(LockPluginFormatfunctionList);
+    auto formatFuncList = gPluginFormatfunctionList; //copy for thread-safety reasons
     SHARED_RELEASE();
-    auto i = commandList.begin();
-    while(i != commandList.end())
+    auto i = formatFuncList.begin();
+    while(i != formatFuncList.end())
     {
-        auto currentExprfunction = *i;
-        if(currentExprfunction.pluginHandle == pluginHandle)
+        auto currentFormatFunc = *i;
+        if(currentFormatFunc.pluginHandle == pluginHandle)
         {
-            i = commandList.erase(i);
-            ExpressionFunctions::Unregister(currentExprfunction.name);
+            i = formatFuncList.erase(i);
+            FormatFunctions::Unregister(currentFormatFunc.name);
         }
         else
             ++i;
@@ -479,7 +794,7 @@ void pluginregistercallback(int pluginHandle, CBTYPE cbType, CBPLUGIN cbPlugin)
     cbStruct.cbType = cbType;
     cbStruct.cbPlugin = cbPlugin;
     EXCLUSIVE_ACQUIRE(LockPluginCallbackList);
-    pluginCallbackList[cbType].push_back(cbStruct);
+    gPluginCallbackList[cbType].push_back(cbStruct);
 }
 
 /**
@@ -490,7 +805,7 @@ void pluginregistercallback(int pluginHandle, CBTYPE cbType, CBPLUGIN cbPlugin)
 bool pluginunregistercallback(int pluginHandle, CBTYPE cbType)
 {
     EXCLUSIVE_ACQUIRE(LockPluginCallbackList);
-    auto & cbList = pluginCallbackList[cbType];
+    auto & cbList = gPluginCallbackList[cbType];
     for(auto it = cbList.begin(); it != cbList.end();)
     {
         if(it->pluginHandle == pluginHandle)
@@ -511,10 +826,10 @@ bool pluginunregistercallback(int pluginHandle, CBTYPE cbType)
 */
 void plugincbcall(CBTYPE cbType, void* callbackInfo)
 {
-    if(pluginCallbackList[cbType].empty())
+    if(gPluginCallbackList[cbType].empty())
         return;
     SHARED_ACQUIRE(LockPluginCallbackList);
-    auto cbList = pluginCallbackList[cbType]; //copy for thread-safety reasons
+    auto cbList = gPluginCallbackList[cbType]; //copy for thread-safety reasons
     SHARED_RELEASE();
     for(const auto & currentCallback : cbList)
         currentCallback.cbPlugin(cbType, callbackInfo);
@@ -527,18 +842,18 @@ void plugincbcall(CBTYPE cbType, void* callbackInfo)
 */
 bool plugincbempty(CBTYPE cbType)
 {
-    return pluginCallbackList[cbType].empty();
+    return gPluginCallbackList[cbType].empty();
 }
 
 static bool findPluginName(int pluginHandle, String & name)
 {
     SHARED_ACQUIRE(LockPluginList);
-    if(pluginData.initStruct.pluginHandle == pluginHandle)
+    if(gLoadingPlugin.initStruct.pluginHandle == pluginHandle)
     {
-        name = pluginData.initStruct.pluginName;
+        name = gLoadingPlugin.initStruct.pluginName;
         return true;
     }
-    for(auto & plugin : pluginList)
+    for(auto & plugin : gPluginList)
     {
         if(plugin.initStruct.pluginHandle == pluginHandle)
         {
@@ -574,7 +889,7 @@ bool plugincmdregister(int pluginHandle, const char* command, CBPLUGINCOMMAND cb
         return false;
     }
     EXCLUSIVE_ACQUIRE(LockPluginCommandList);
-    pluginCommandList.push_back(plugCmd);
+    gPluginCommandList.push_back(plugCmd);
     EXCLUSIVE_RELEASE();
     dprintf(QT_TRANSLATE_NOOP("DBG", "[PLUGIN, %s] Command \"%s\" registered!\n"), plugName.c_str(), command);
     return true;
@@ -594,12 +909,12 @@ bool plugincmdunregister(int pluginHandle, const char* command)
     if(!findPluginName(pluginHandle, plugName))
         return false;
     EXCLUSIVE_ACQUIRE(LockPluginCommandList);
-    for(auto it = pluginCommandList.begin(); it != pluginCommandList.end(); ++it)
+    for(auto it = gPluginCommandList.begin(); it != gPluginCommandList.end(); ++it)
     {
         const auto & currentCommand = *it;
         if(currentCommand.pluginHandle == pluginHandle && !strcmp(currentCommand.command, command))
         {
-            pluginCommandList.erase(it);
+            gPluginCommandList.erase(it);
             EXCLUSIVE_RELEASE();
             if(!dbgcmddel(command))
                 goto beach;
@@ -623,23 +938,18 @@ int pluginmenuadd(int hMenu, const char* title)
     if(!title || !strlen(title))
         return -1;
     EXCLUSIVE_ACQUIRE(LockPluginMenuList);
-    int nFound = -1;
-    for(unsigned int i = 0; i < pluginMenuList.size(); i++)
+    auto found = std::find_if(gPluginMenuList.begin(), gPluginMenuList.end(), [hMenu](const PLUG_MENU & menu)
     {
-        if(pluginMenuList.at(i).hEntryMenu == hMenu)
-        {
-            nFound = i;
-            break;
-        }
-    }
-    if(nFound == -1) //not a valid menu handle
+        return menu.hEntryMenu == hMenu;
+    });
+    if(found == gPluginMenuList.end()) //not a valid menu handle
         return -1;
     int hMenuNew = GuiMenuAdd(hMenu, title);
     PLUG_MENU newMenu;
-    newMenu.pluginHandle = pluginMenuList.at(nFound).pluginHandle;
+    newMenu.pluginHandle = found->pluginHandle;
     newMenu.hEntryMenu = hMenuNew;
     newMenu.hParentMenu = hMenu;
-    pluginMenuList.push_back(newMenu);
+    gPluginMenuList.push_back(newMenu);
     return hMenuNew;
 }
 
@@ -657,7 +967,7 @@ bool pluginmenuaddentry(int hMenu, int hEntry, const char* title)
     EXCLUSIVE_ACQUIRE(LockPluginMenuList);
     int pluginHandle = -1;
     //find plugin handle
-    for(const auto & currentMenu : pluginMenuList)
+    for(const auto & currentMenu : gPluginMenuList)
     {
         if(currentMenu.hEntryMenu == hMenu)
         {
@@ -668,7 +978,7 @@ bool pluginmenuaddentry(int hMenu, int hEntry, const char* title)
     if(pluginHandle == -1) //not found
         return false;
     //search if hEntry was previously used
-    for(const auto & currentMenu : pluginMenuEntryList)
+    for(const auto & currentMenu : gPluginMenuEntryList)
         if(currentMenu.pluginHandle == pluginHandle && currentMenu.hEntryPlugin == hEntry)
             return false;
     int hNewEntry = GuiMenuAddEntry(hMenu, title);
@@ -679,7 +989,7 @@ bool pluginmenuaddentry(int hMenu, int hEntry, const char* title)
     newMenu.hParentMenu = hMenu;
     newMenu.hEntryPlugin = hEntry;
     newMenu.pluginHandle = pluginHandle;
-    pluginMenuEntryList.push_back(newMenu);
+    gPluginMenuEntryList.push_back(newMenu);
     return true;
 }
 
@@ -691,7 +1001,7 @@ bool pluginmenuaddentry(int hMenu, int hEntry, const char* title)
 bool pluginmenuaddseparator(int hMenu)
 {
     SHARED_ACQUIRE(LockPluginMenuList);
-    for(const auto & currentMenu : pluginMenuList)
+    for(const auto & currentMenu : gPluginMenuList)
     {
         if(currentMenu.hEntryMenu == hMenu)
         {
@@ -709,17 +1019,17 @@ bool pluginmenuaddseparator(int hMenu)
 static void pluginmenuclear_helper(int hMenu)
 {
     //delete menu entries
-    for(auto i = pluginMenuEntryList.size() - 1; i != -1; i--)
-        if(hMenu == pluginMenuEntryList.at(i).hParentMenu) //we found an entry that has the menu as parent
-            pluginMenuEntryList.erase(pluginMenuEntryList.begin() + i);
+    for(auto i = gPluginMenuEntryList.size() - 1; i != -1; i--)
+        if(hMenu == gPluginMenuEntryList.at(i).hParentMenu) //we found an entry that has the menu as parent
+            gPluginMenuEntryList.erase(gPluginMenuEntryList.begin() + i);
     //delete the menus
     std::vector<int> menuClearQueue;
-    for(auto i = pluginMenuList.size() - 1; i != -1; i--)
+    for(auto i = gPluginMenuList.size() - 1; i != -1; i--)
     {
-        if(hMenu == pluginMenuList.at(i).hParentMenu) //we found a menu that has the menu as parent
+        if(hMenu == gPluginMenuList.at(i).hParentMenu) //we found a menu that has the menu as parent
         {
-            menuClearQueue.push_back(pluginMenuList.at(i).hEntryMenu);
-            pluginMenuList.erase(pluginMenuList.begin() + i);
+            menuClearQueue.push_back(gPluginMenuList.at(i).hEntryMenu);
+            gPluginMenuList.erase(gPluginMenuList.begin() + i);
         }
     }
     //recursively clear the menus
@@ -736,14 +1046,14 @@ bool pluginmenuclear(int hMenu, bool erase)
 {
     EXCLUSIVE_ACQUIRE(LockPluginMenuList);
     pluginmenuclear_helper(hMenu);
-    for(auto it = pluginMenuList.begin(); it != pluginMenuList.end(); ++it)
+    for(auto it = gPluginMenuList.begin(); it != gPluginMenuList.end(); ++it)
     {
         const auto & currentMenu = *it;
         if(currentMenu.hEntryMenu == hMenu)
         {
             if(erase)
             {
-                it = pluginMenuList.erase(it);
+                it = gPluginMenuList.erase(it);
                 GuiMenuRemove(hMenu);
             }
             else
@@ -763,9 +1073,9 @@ void pluginmenucall(int hEntry)
     if(hEntry == -1)
         return;
 
-    SectionLocker<LockPluginMenuList, true> menuLock; //shared lock
-    auto i = pluginMenuEntryList.begin();
-    while(i != pluginMenuEntryList.end())
+    SharedSectionLocker<LockPluginMenuList> menuLock;
+    auto i = gPluginMenuEntryList.begin();
+    while(i != gPluginMenuEntryList.end())
     {
         const auto currentMenu = *i;
         ++i;
@@ -773,8 +1083,8 @@ void pluginmenucall(int hEntry)
         {
             PLUG_CB_MENUENTRY menuEntryInfo;
             menuEntryInfo.hEntry = currentMenu.hEntryPlugin;
-            SectionLocker<LockPluginCallbackList, true> callbackLock; //shared lock
-            const auto & cbList = pluginCallbackList[CB_MENUENTRY];
+            SharedSectionLocker<LockPluginCallbackList, true> callbackLock;
+            const auto & cbList = gPluginCallbackList[CB_MENUENTRY];
             for(auto j = cbList.begin(); j != cbList.end();)
             {
                 auto currentCallback = *j++;
@@ -828,7 +1138,7 @@ bool pluginwineventglobal(MSG* message)
 void pluginmenuseticon(int hMenu, const ICONDATA* icon)
 {
     SHARED_ACQUIRE(LockPluginMenuList);
-    for(const auto & currentMenu : pluginMenuList)
+    for(const auto & currentMenu : gPluginMenuList)
     {
         if(currentMenu.hEntryMenu == hMenu)
         {
@@ -849,7 +1159,7 @@ void pluginmenuentryseticon(int pluginHandle, int hEntry, const ICONDATA* icon)
     if(hEntry == -1)
         return;
     SHARED_ACQUIRE(LockPluginMenuList);
-    for(const auto & currentMenu : pluginMenuEntryList)
+    for(const auto & currentMenu : gPluginMenuEntryList)
     {
         if(currentMenu.pluginHandle == pluginHandle && currentMenu.hEntryPlugin == hEntry)
         {
@@ -864,7 +1174,7 @@ void pluginmenuentrysetchecked(int pluginHandle, int hEntry, bool checked)
     if(hEntry == -1)
         return;
     SHARED_ACQUIRE(LockPluginMenuList);
-    for(const auto & currentMenu : pluginMenuEntryList)
+    for(const auto & currentMenu : gPluginMenuEntryList)
     {
         if(currentMenu.pluginHandle == pluginHandle && currentMenu.hEntryPlugin == hEntry)
         {
@@ -877,7 +1187,7 @@ void pluginmenuentrysetchecked(int pluginHandle, int hEntry, bool checked)
 void pluginmenusetvisible(int pluginHandle, int hMenu, bool visible)
 {
     SHARED_ACQUIRE(LockPluginMenuList);
-    for(const auto & currentMenu : pluginMenuList)
+    for(const auto & currentMenu : gPluginMenuList)
     {
         if(currentMenu.hEntryMenu == hMenu)
         {
@@ -892,11 +1202,11 @@ void pluginmenuentrysetvisible(int pluginHandle, int hEntry, bool visible)
     if(hEntry == -1)
         return;
     SHARED_ACQUIRE(LockPluginMenuList);
-    for(const auto & currentMenu : pluginMenuEntryList)
+    for(const auto & currentMenu : gPluginMenuEntryList)
     {
         if(currentMenu.pluginHandle == pluginHandle && currentMenu.hEntryPlugin == hEntry)
         {
-            GuiMenuSetEntryChecked(currentMenu.hEntryMenu, visible);
+            GuiMenuSetEntryVisible(currentMenu.hEntryMenu, visible);
             break;
         }
     }
@@ -907,7 +1217,7 @@ void pluginmenusetname(int pluginHandle, int hMenu, const char* name)
     if(!name)
         return;
     SHARED_ACQUIRE(LockPluginMenuList);
-    for(const auto & currentMenu : pluginMenuList)
+    for(const auto & currentMenu : gPluginMenuList)
     {
         if(currentMenu.hEntryMenu == hMenu)
         {
@@ -922,7 +1232,7 @@ void pluginmenuentrysetname(int pluginHandle, int hEntry, const char* name)
     if(hEntry == -1 || !name)
         return;
     SHARED_ACQUIRE(LockPluginMenuList);
-    for(const auto & currentMenu : pluginMenuEntryList)
+    for(const auto & currentMenu : gPluginMenuEntryList)
     {
         if(currentMenu.pluginHandle == pluginHandle && currentMenu.hEntryPlugin == hEntry)
         {
@@ -937,17 +1247,19 @@ void pluginmenuentrysethotkey(int pluginHandle, int hEntry, const char* hotkey)
     if(hEntry == -1 || !hotkey)
         return;
     SHARED_ACQUIRE(LockPluginMenuList);
-    for(const auto & currentMenu : pluginMenuEntryList)
+    for(const auto & currentMenu : gPluginMenuEntryList)
     {
         if(currentMenu.pluginHandle == pluginHandle && currentMenu.hEntryPlugin == hEntry)
         {
-            for(const auto & plugin : pluginList)
+            for(const auto & plugin : gPluginList)
             {
                 if(plugin.initStruct.pluginHandle == pluginHandle)
                 {
                     char name[MAX_PATH] = "";
                     strcpy_s(name, plugin.plugname);
-                    *strrchr(name, '.') = '\0';
+                    auto dot = strrchr(name, '.');
+                    if(dot != nullptr)
+                        *dot = '\0';
                     auto hack = StringUtils::sprintf("%s\1%s_%d", hotkey, name, hEntry);
                     GuiMenuSetEntryHotkey(currentMenu.hEntryMenu, hack.c_str());
                     break;
@@ -961,7 +1273,7 @@ void pluginmenuentrysethotkey(int pluginHandle, int hEntry, const char* hotkey)
 bool pluginmenuremove(int hMenu)
 {
     EXCLUSIVE_ACQUIRE(LockPluginMenuList);
-    for(const auto & currentMenu : pluginMenuList)
+    for(const auto & currentMenu : gPluginMenuList)
         if(currentMenu.hEntryMenu == hMenu && currentMenu.hParentMenu < 256)
             return false;
     return pluginmenuclear(hMenu, true);
@@ -970,18 +1282,40 @@ bool pluginmenuremove(int hMenu)
 bool pluginmenuentryremove(int pluginHandle, int hEntry)
 {
     EXCLUSIVE_ACQUIRE(LockPluginMenuList);
-    for(auto it = pluginMenuEntryList.begin(); it != pluginMenuEntryList.end(); ++it)
+    for(auto it = gPluginMenuEntryList.begin(); it != gPluginMenuEntryList.end(); ++it)
     {
         const auto & currentEntry = *it;
         if(currentEntry.pluginHandle == pluginHandle && currentEntry.hEntryPlugin == hEntry)
         {
             GuiMenuRemove(currentEntry.hEntryMenu);
-            pluginMenuEntryList.erase(it);
+            gPluginMenuEntryList.erase(it);
             return true;
         }
     }
     return false;
 }
+
+struct ExprFuncWrapper
+{
+    void* user = nullptr;
+    int argc = 0;
+    CBPLUGINEXPRFUNCTION cbFunc = nullptr;
+    std::vector<duint> cbArgv;
+
+    static bool callback(ExpressionValue* result, int argc, const ExpressionValue* argv, void* userdata)
+    {
+        auto cbUser = reinterpret_cast<ExprFuncWrapper*>(userdata);
+
+        cbUser->cbArgv.clear();
+        for(auto i = 0; i < argc; i++)
+            cbUser->cbArgv.push_back(argv[i].number);
+
+        result->type = ValueTypeNumber;
+        result->number = cbUser->cbFunc(argc, cbUser->cbArgv.data(), cbUser->user);
+
+        return true;
+    }
+};
 
 bool pluginexprfuncregister(int pluginHandle, const char* name, int argc, CBPLUGINEXPRFUNCTION cbFunction, void* userdata)
 {
@@ -991,17 +1325,55 @@ bool pluginexprfuncregister(int pluginHandle, const char* name, int argc, CBPLUG
     PLUG_EXPRFUNCTION plugExprfunction;
     plugExprfunction.pluginHandle = pluginHandle;
     strcpy_s(plugExprfunction.name, name);
-    if(!ExpressionFunctions::Register(name, argc, cbFunction, userdata))
+
+    auto* wrapper = new ExprFuncWrapper;
+    wrapper->argc = argc;
+    wrapper->cbFunc = cbFunction;
+    wrapper->user = userdata;
+
+    std::vector<ValueType> args(argc);
+
+    for(auto & arg : args)
+        arg = ValueTypeNumber;
+
+    if(!ExpressionFunctions::Register(name, ValueTypeNumber, args, ExprFuncWrapper::callback, wrapper))
     {
         dprintf(QT_TRANSLATE_NOOP("DBG", "[PLUGIN, %s] Expression function \"%s\" failed to register...\n"), plugName.c_str(), name);
         return false;
     }
     EXCLUSIVE_ACQUIRE(LockPluginExprfunctionList);
-    pluginExprfunctionList.push_back(plugExprfunction);
+    gPluginExprfunctionList.push_back(plugExprfunction);
     EXCLUSIVE_RELEASE();
     dprintf(QT_TRANSLATE_NOOP("DBG", "[PLUGIN, %s] Expression function \"%s\" registered!\n"), plugName.c_str(), name);
     return true;
 }
+
+bool pluginexprfuncregisterex(int pluginHandle, const char* name, const ValueType & returnType, const ValueType* argTypes, size_t argCount, CBPLUGINEXPRFUNCTIONEX cbFunction, void* userdata)
+{
+    String plugName;
+    if(!findPluginName(pluginHandle, plugName))
+        return false;
+    PLUG_EXPRFUNCTION plugExprfunction;
+    plugExprfunction.pluginHandle = pluginHandle;
+    strcpy_s(plugExprfunction.name, name);
+
+    std::vector<ValueType> argTypesVec(argCount);
+
+    for(size_t i = 0; i < argCount; i++)
+        argTypesVec[i] = argTypes[i];
+
+    if(!ExpressionFunctions::Register(name, returnType, argTypesVec, cbFunction, userdata))
+    {
+        dprintf(QT_TRANSLATE_NOOP("DBG", "[PLUGIN, %s] Expression function \"%s\" failed to register...\n"), plugName.c_str(), name);
+        return false;
+    }
+    EXCLUSIVE_ACQUIRE(LockPluginExprfunctionList);
+    gPluginExprfunctionList.push_back(plugExprfunction);
+    EXCLUSIVE_RELEASE();
+    dprintf(QT_TRANSLATE_NOOP("DBG", "[PLUGIN, %s] Expression function \"%s\" registered!\n"), plugName.c_str(), name);
+    return true;
+}
+
 
 bool pluginexprfuncunregister(int pluginHandle, const char* name)
 {
@@ -1009,12 +1381,12 @@ bool pluginexprfuncunregister(int pluginHandle, const char* name)
     if(!findPluginName(pluginHandle, plugName))
         return false;
     EXCLUSIVE_ACQUIRE(LockPluginExprfunctionList);
-    for(auto it = pluginExprfunctionList.begin(); it != pluginExprfunctionList.end(); ++it)
+    for(auto it = gPluginExprfunctionList.begin(); it != gPluginExprfunctionList.end(); ++it)
     {
         const auto & currentExprfunction = *it;
         if(currentExprfunction.pluginHandle == pluginHandle && !strcmp(currentExprfunction.name, name))
         {
-            pluginExprfunctionList.erase(it);
+            gPluginExprfunctionList.erase(it);
             EXCLUSIVE_RELEASE();
             if(!ExpressionFunctions::Unregister(name))
                 goto beach;
@@ -1041,7 +1413,7 @@ bool pluginformatfuncregister(int pluginHandle, const char* type, CBPLUGINFORMAT
         return false;
     }
     EXCLUSIVE_ACQUIRE(LockPluginFormatfunctionList);
-    pluginFormatfunctionList.push_back(plugFormatfunction);
+    gPluginFormatfunctionList.push_back(plugFormatfunction);
     EXCLUSIVE_RELEASE();
     dprintf(QT_TRANSLATE_NOOP("DBG", "[PLUGIN, %s] Format function \"%s\" registered!\n"), plugName.c_str(), type);
     return true;
@@ -1053,12 +1425,12 @@ bool pluginformatfuncunregister(int pluginHandle, const char* type)
     if(!findPluginName(pluginHandle, plugName))
         return false;
     EXCLUSIVE_ACQUIRE(LockPluginFormatfunctionList);
-    for(auto it = pluginFormatfunctionList.begin(); it != pluginFormatfunctionList.end(); ++it)
+    for(auto it = gPluginFormatfunctionList.begin(); it != gPluginFormatfunctionList.end(); ++it)
     {
         const auto & currentFormatfunction = *it;
         if(currentFormatfunction.pluginHandle == pluginHandle && !strcmp(currentFormatfunction.name, type))
         {
-            pluginFormatfunctionList.erase(it);
+            gPluginFormatfunctionList.erase(it);
             EXCLUSIVE_RELEASE();
             if(!FormatFunctions::Unregister(type))
                 goto beach;

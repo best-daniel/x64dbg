@@ -8,7 +8,9 @@
 #include <windows.h>
 #include "crashdump.h"
 #include "../bridge/bridgemain.h"
+#include "../bridge/startupargs.h"
 #include "LoadResourceString.h"
+#include "signaturecheck.h"
 
 /**
  @fn int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nShowCmd)
@@ -25,9 +27,18 @@
 
 int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nShowCmd)
 {
+    // Reference: https://www.trendmicro.com/pl_pl/research/23/b/investigating-the-plugx-trojan-disguised-as-a-legitimate-windows.html
+    if(!InitializeSignatureCheck())
+        MessageBoxA(nullptr, "Failed to initialize signature check.", "Error", MB_SYSTEMMODAL | MB_ICONERROR);
+
     CrashDumpInitialize();
 
-    const wchar_t* errormsg = BridgeInit();
+    const auto startupOptions = ParseHostStartupOptions();
+
+    BRIDGE_CONFIG config = {};
+    if(!startupOptions.userDirectory.empty())
+        config.szUserDirectory = startupOptions.userDirectory.c_str();
+    const wchar_t* errormsg = BridgeInit(&config);
     if(errormsg)
     {
         MessageBoxW(0, errormsg, LoadResString(IDS_BRIDGEINITERR), MB_ICONERROR | MB_SYSTEMMODAL);

@@ -4,61 +4,25 @@
 #include "TitanEngine/TitanEngine.h"
 #include "memory.h"
 #include "function.h"
+#include "database_cb_batcher.h"
 
 ControlFlowAnalysis::ControlFlowAnalysis(duint base, duint size, bool exceptionDirectory)
-    : Analysis(base, size),
-      mFunctionInfoSize(0),
-      mFunctionInfoData(nullptr)
+    : Analysis(base, size)
 {
 #ifdef _WIN64
-    // This will only be valid if the address range is within a loaded module
-    mModuleBase = ModBaseFromAddr(base);
+    SHARED_ACQUIRE(LockModules);
 
-    if(exceptionDirectory && mModuleBase != 0)
+    auto modInfo = ModInfoFromAddr(base);
+    if(modInfo == nullptr)
+        return;
+
+    mModuleBase = modInfo->base;
+
+    if(exceptionDirectory)
     {
-        char modulePath[MAX_PATH];
-        memset(modulePath, 0, sizeof(modulePath));
-
-        ModPathFromAddr(mModuleBase, modulePath, ARRAYSIZE(modulePath));
-
-        HANDLE fileHandle;
-        DWORD fileSize;
-        HANDLE fileMapHandle;
-        ULONG_PTR fileMapVa;
-        if(StaticFileLoadW(
-                    StringUtils::Utf8ToUtf16(modulePath).c_str(),
-                    UE_ACCESS_READ,
-                    false,
-                    &fileHandle,
-                    &fileSize,
-                    &fileMapHandle,
-                    &fileMapVa))
-        {
-            // Find a pointer to IMAGE_DIRECTORY_ENTRY_EXCEPTION for later use
-            auto virtualOffset = GetPE32DataFromMappedFile(fileMapVa, IMAGE_DIRECTORY_ENTRY_EXCEPTION, UE_SECTIONVIRTUALOFFSET);
-            mFunctionInfoSize = duint(GetPE32DataFromMappedFile(fileMapVa, IMAGE_DIRECTORY_ENTRY_EXCEPTION, UE_SECTIONVIRTUALSIZE));
-
-            // Unload the file
-            StaticFileUnloadW(nullptr, false, fileHandle, fileSize, fileMapHandle, fileMapVa);
-
-            // Get a copy of the function table
-            if(virtualOffset)
-            {
-                // Read the table into a buffer
-                mFunctionInfoData = emalloc(mFunctionInfoSize);
-
-                if(mFunctionInfoData)
-                    MemRead(virtualOffset + mModuleBase, mFunctionInfoData, mFunctionInfoSize);
-            }
-        }
+        mRuntimeFunctions = modInfo->runtimeFunctions;
     }
 #endif //_WIN64
-}
-
-ControlFlowAnalysis::~ControlFlowAnalysis()
-{
-    if(mFunctionInfoData)
-        efree(mFunctionInfoData);
 }
 
 void ControlFlowAnalysis::Analyse()
@@ -86,6 +50,8 @@ void ControlFlowAnalysis::Analyse()
 
 void ControlFlowAnalysis::SetMarkers()
 {
+    DbCallbackBatcher batcher;
+
     FunctionDelRange(mBase, mBase + mSize - 1, false);
     auto size = mFunctionRanges.size();
     for(auto i = size - 1; i != -1; i--)
@@ -140,26 +106,26 @@ void ControlFlowAnalysis::BasicBlockStarts()
     for(duint i = 0; i < mSize;)
     {
         auto addr = mBase + i;
-        if(mCp.Disassemble(addr, translateAddr(addr), MAX_DISASM_BUFFER))
+        if(mZydis.Disassemble(addr, translateAddr(addr), MAX_DISASM_BUFFER))
         {
             if(bSkipFilling) //handle filling skip mode
             {
-                if(!mCp.IsFilling()) //do nothing until the filling stopped
+                if(!mZydis.IsFilling()) //do nothing until the filling stopped
                 {
                     bSkipFilling = false;
                     mBlockStarts.insert(addr);
                 }
             }
-            else if(mCp.IsRet()) //RET breaks control flow
+            else if(mZydis.IsRet()) //RET breaks control flow
             {
                 bSkipFilling = true; //skip INT3/NOP/whatever filling bytes (those are not part of the control flow)
             }
-            else if(mCp.IsJump() || mCp.IsLoop()) //branches
+            else if(mZydis.IsJump() || mZydis.IsLoop()) //branches
             {
                 auto dest1 = getReferenceOperand();
                 duint dest2 = 0;
-                if(mCp.GetId() != ZYDIS_MNEMONIC_JMP) //conditional jump
-                    dest2 = addr + mCp.Size();
+                if(mZydis.GetId() != ZYDIS_MNEMONIC_JMP) //conditional jump
+                    dest2 = addr + mZydis.Size();
 
                 if(!dest1 && !dest2) //TODO: better code for this (make sure absolutely no filling is inserted)
                     bSkipFilling = true;
@@ -168,7 +134,7 @@ void ControlFlowAnalysis::BasicBlockStarts()
                 if(dest2)
                     mBlockStarts.insert(dest2);
             }
-            else if(mCp.IsCall())
+            else if(mZydis.IsCall())
             {
                 auto dest1 = getReferenceOperand();
                 if(dest1)
@@ -183,7 +149,7 @@ void ControlFlowAnalysis::BasicBlockStarts()
                 if(dest1)
                     mBlockStarts.insert(dest1);
             }
-            i += mCp.Size();
+            i += mZydis.Size();
         }
         else
             i++;
@@ -204,23 +170,23 @@ void ControlFlowAnalysis::BasicBlocks()
         for(duint addr = start, prevaddr; addr < mBase + mSize;)
         {
             prevaddr = addr;
-            if(mCp.Disassemble(addr, translateAddr(addr), MAX_DISASM_BUFFER))
+            if(mZydis.Disassemble(addr, translateAddr(addr), MAX_DISASM_BUFFER))
             {
-                if(mCp.IsRet())
+                if(mZydis.IsRet())
                 {
                     insertBlock(BasicBlock(start, addr, 0, 0)); //leaf block
                     break;
                 }
-                else if(mCp.IsJump() || mCp.IsLoop())
+                else if(mZydis.IsJump() || mZydis.IsLoop())
                 {
                     auto dest1 = getReferenceOperand();
-                    auto dest2 = mCp.GetId() != ZYDIS_MNEMONIC_JMP ? addr + mCp.Size() : 0;
+                    auto dest2 = mZydis.GetId() != ZYDIS_MNEMONIC_JMP ? addr + mZydis.Size() : 0;
                     insertBlock(BasicBlock(start, addr, dest1, dest2));
                     insertParent(dest1, start);
                     insertParent(dest2, start);
                     break;
                 }
-                addr += mCp.Size();
+                addr += mZydis.Size();
             }
             else
                 addr++;
@@ -236,18 +202,16 @@ void ControlFlowAnalysis::BasicBlocks()
 
 #ifdef _WIN64
     auto count = 0;
-    enumerateFunctionRuntimeEntries64([&](PRUNTIME_FUNCTION Function)
+    for(const auto & Function : mRuntimeFunctions)
     {
-        auto funcAddr = mModuleBase + Function->BeginAddress;
-        auto funcEnd = mModuleBase + Function->EndAddress;
+        auto funcAddr = mModuleBase + Function.BeginAddress;
+        auto funcEnd = mModuleBase + Function.EndAddress;
 
         // If within limits...
         if(inRange(funcAddr) && inRange(funcEnd))
             mFunctionStarts.insert(funcAddr);
-        count++;
-        return true;
-    });
-    dprintf("%d functions from the exception directory...\n", count);
+    };
+    dprintf("%d functions from the exception directory...\n", (int)mRuntimeFunctions.size());
 #endif // _WIN64
 
     dprintf("%d basic blocks, %d function starts detected...\n", int(mBlocks.size()), int(mFunctionStarts.size()));
@@ -275,7 +239,7 @@ void ControlFlowAnalysis::Functions()
             {
                 auto function = findFunctionStart(block, parents);
                 if(!function) //this happens with loops / unreferenced blocks sometimes
-                    delayedBlocks.push_back(DelayedBlock(block, parents));
+                    delayedBlocks.emplace_back(block, parents);
                 else
                     block->function = function;
             }
@@ -413,9 +377,9 @@ String ControlFlowAnalysis::blockToString(const BasicBlock* block)
 
 duint ControlFlowAnalysis::getReferenceOperand() const
 {
-    for(auto i = 0; i < mCp.OpCount(); i++)
+    for(auto i = 0; i < mZydis.OpCount(); i++)
     {
-        const auto & op = mCp[i];
+        const auto & op = mZydis[i];
         if(op.type == ZYDIS_OPERAND_TYPE_IMMEDIATE)
         {
             auto dest = duint(op.imm.value.u);
@@ -426,29 +390,10 @@ duint ControlFlowAnalysis::getReferenceOperand() const
         {
             auto dest = duint(op.mem.disp.value);
             if(op.mem.base == ZYDIS_REGISTER_RIP) //rip-relative
-                dest += mCp.Address() + mCp.Size();
+                dest += (duint)mZydis.Address() + mZydis.Size();
             if(inRange(dest))
                 return dest;
         }
     }
     return 0;
 }
-
-#ifdef _WIN64
-void ControlFlowAnalysis::enumerateFunctionRuntimeEntries64(const std::function<bool(PRUNTIME_FUNCTION)> & Callback) const
-{
-    if(!mFunctionInfoData)
-        return;
-
-    // Get the table pointer and size
-    auto functionTable = PRUNTIME_FUNCTION(mFunctionInfoData);
-    auto totalCount = mFunctionInfoSize / sizeof(RUNTIME_FUNCTION);
-
-    // Enumerate each entry
-    for(duint i = 0; i < totalCount; i++)
-    {
-        if(!Callback(&functionTable[i]))
-            break;
-    }
-}
-#endif // _WIN64

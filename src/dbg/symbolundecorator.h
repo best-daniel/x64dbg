@@ -57,10 +57,6 @@ enum
     X_UNDNAME_NO_PTR64 = 0x20000, //Does not include ptr64 in output.
 };
 
-#if _MSC_VER != 1800
-#error unDNameEx is undocumented and possibly unsupported on your runtime! Uncomment this line if you understand the risks and want continue regardless...
-#endif //_MSC_VER
-
 //undname.cxx
 extern "C" pchar_t __cdecl __unDNameEx(_Out_opt_z_cap_(maxStringLength) pchar_t outputString,
                                        pcchar_t name,
@@ -85,7 +81,7 @@ inline bool undecorateName(const std::string & decoratedName, std::string & unde
                     mymalloc,
                     myfree,
                     nullptr,
-                    X_UNDNAME_COMPLETE))
+                    X_UNDNAME_COMPLETE | X_UNDNAME_32_BIT_DECODE | X_UNDNAME_NO_PTR64))
     {
         undecoratedName.clear();
         return false;

@@ -43,7 +43,7 @@ public:
 
         String ToString() const
         {
-            return StringUtils::sprintf("start: p\nend: p\nfunction: %p", start, end, parentGraph);
+            return StringUtils::sprintf("start: %p\nend: %p\nfunction: %p", start, end, parentGraph);
         }
     };
 
@@ -137,7 +137,7 @@ protected:
     std::unordered_set<duint> mFuzzyEPs;
     std::vector<CFGraph> mFunctions;
     std::unordered_map<duint, std::vector<XREF>> mXrefs;
-    byte* mEncMap;
+    uint8_t* mEncMap = nullptr;
 private:
 
     bool mDump;

@@ -9,17 +9,22 @@ struct CookieQuery
     bool removeAddrBp = false;
     bool removeRetBp = false;
 
-    void HandleNtdllLoad()
+    void HandleNtdllLoad(bool isAttached)
     {
         *this = CookieQuery();
-        if(valfromstring("ntdll.dll:NtQueryInformationProcess", &addr))
+        ULONG returnSize = 0;
+        NTSTATUS status = NtQueryInformationProcess(fdProcessInfo->hProcess, ProcessCookie, &cookie, sizeof(cookie), &returnSize);
+        if(!NT_SUCCESS(status))
         {
-            if(!BpGet(addr, BPNORMAL, nullptr, nullptr))
+            if(!isAttached && valfromstring("ntdll.dll:NtQueryInformationProcess", &addr))
             {
-                if(SetBPX(addr, UE_BREAKPOINT, (void*)cbUserBreakpoint))
-                    removeAddrBp = true;
-                else
-                    addr = 0;
+                if(!BpGet(addr, BPNORMAL, nullptr, nullptr))
+                {
+                    if(SetBPX(addr, UE_BREAKPOINT, cbUserBreakpoint))
+                        removeAddrBp = true;
+                    else
+                        addr = 0;
+                }
             }
         }
     }
@@ -33,7 +38,7 @@ struct CookieQuery
                 cookieptr = Exprfunc::argget(2);
                 if(!BpGet(ret, BPNORMAL, nullptr, nullptr))
                 {
-                    if(SetBPX(ret, UE_BREAKPOINT, (void*)cbUserBreakpoint))
+                    if(SetBPX(ret, UE_BREAKPOINT, cbUserBreakpoint))
                         removeRetBp = true;
                     else
                         ret = 0;

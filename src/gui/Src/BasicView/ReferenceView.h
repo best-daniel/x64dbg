@@ -1,10 +1,8 @@
-#ifndef REFERENCEVIEW_H
-#define REFERENCEVIEW_H
+#pragma once
 
 #include <QProgressBar>
 #include <QLabel>
 #include "StdSearchListView.h"
-class DisassemblyPopup;
 
 class QTabWidget;
 
@@ -17,15 +15,17 @@ public:
     void setupContextMenu();
     void connectBridge();
     void disconnectBridge();
+    int progress() const;
+    int currentTaskProgress() const;
 
 public slots:
     void addColumnAtRef(int width, QString title);
 
-    void setRowCount(dsint count) override;
+    void setRowCount(duint count) override;
 
     void setSingleSelection(int index, bool scroll);
     void addCommand(QString title, QString command);
-    void referenceContextMenu(QMenu* wMenu);
+    void referenceContextMenu(QMenu* menu);
     void followAddress();
     void followDumpAddress();
     void followApiAddress();
@@ -36,10 +36,12 @@ public slots:
     void setBreakpointOnAllApiCalls();
     void removeBreakpointOnAllApiCalls();
     void toggleBookmark();
+    void copyReferenceAddress();
     void refreshShortcutsSlot();
     void referenceSetProgressSlot(int progress);
     void referenceSetCurrentTaskProgressSlot(int progress, QString taskTitle);
-    void searchSelectionChanged(int index);
+    void searchSelectionChanged(duint index);
+    void reloadDataSlot();
 
 signals:
     void showCpu();
@@ -55,10 +57,12 @@ private:
     QAction* mFollowApiAddress;
     QAction* mToggleBreakpoint;
     QAction* mToggleBookmark;
+    QAction* mCopyReferenceAddress;
     QAction* mSetBreakpointOnAllCommands;
     QAction* mRemoveBreakpointOnAllCommands;
     QAction* mSetBreakpointOnAllApiCalls;
     QAction* mRemoveBreakpointOnAllApiCalls;
+    bool mUpdateCountLabel = false;
     QLabel* mCountTotalLabel;
     QVector<QString> mCommandTitles;
     QVector<QString> mCommands;
@@ -72,10 +76,8 @@ private:
         Remove
     };
 
-    void setBreakpointAt(int row, BPSetAction action);
+    void setBreakpointAt(duint row, BPSetAction action);
     dsint apiAddressFromString(const QString & s);
 
-    void mouseReleaseEvent(QMouseEvent* event);
+    void mouseReleaseEvent(QMouseEvent* event) override;
 };
-
-#endif // REFERENCEVIEW_H

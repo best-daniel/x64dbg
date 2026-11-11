@@ -1,9 +1,9 @@
-#ifndef DISASSEMBLYPOPUP_H
-#define DISASSEMBLYPOPUP_H
+#pragma once
 
 #include <QFrame>
-#include "Imports.h"
-#include "QBeaEngine.h"
+#include <Imports.h>
+#include <Disassembler/QZydis.h>
+#include <BasicView/AbstractTableView.h>
 
 class CachedFontMetrics;
 
@@ -11,10 +11,9 @@ class DisassemblyPopup : public QFrame
 {
     Q_OBJECT
 public:
-    explicit DisassemblyPopup(QWidget* parent);
-    void paintEvent(QPaintEvent* event);
+    DisassemblyPopup(AbstractTableView* parent, Architecture* architecture);
     void setAddress(duint Address);
-    duint getAddress();
+    duint getAddress() const;
 
 public slots:
     void hide();
@@ -23,27 +22,32 @@ public slots:
     void tokenizerConfigUpdated();
 
 protected:
-    CachedFontMetrics* mFontMetrics;
-    duint addr;
-    QString addrText;
-    QString addrComment;
-    bool addrCommentAuto;
-    int charWidth;
-    int charHeight;
-    int mWidth;
-    unsigned int mMaxInstructions;
+    void paintEvent(QPaintEvent* event) override;
+    bool eventFilter(QObject* object, QEvent* event) override;
+    void timerEvent(QTimerEvent* event) override;
+    void stopPopupTimer();
 
-    QColor disassemblyBackgroundColor;
-    QColor disassemblyTracedColor;
-    QColor labelColor;
-    QColor labelBackgroundColor;
-    QColor commentColor;
-    QColor commentBackgroundColor;
-    QColor commentAutoColor;
-    QColor commentAutoBackgroundColor;
-    QBeaEngine mDisasm;
+    CachedFontMetrics* mFontMetrics = nullptr;
+    duint mAddr = 0;
+    QString mAddrText;
+    QString mAddrComment;
+    bool mAddrCommentAuto = false;
+    int mCharWidth = 0;
+    int mCharHeight = 0;
+    int mWidth = 0;
+    int mPopupTimer = 0;
+    unsigned int mMaxInstructions = 20;
+
+    QColor mDisassemblyBackgroundColor;
+    QColor mDisassemblyTracedColor;
+    QColor mLabelColor;
+    QColor mLabelBackgroundColor;
+    QColor mCommentColor;
+    QColor mCommentBackgroundColor;
+    QColor mCommentAutoColor;
+    QColor mCommentAutoBackgroundColor;
+    QZydis mDisasm;
+    AbstractTableView* mParent = nullptr;
 
     std::vector<std::pair<RichTextPainter::List, bool>> mDisassemblyToken;
 };
-
-#endif // DISASSEMBLYPOPUP_H

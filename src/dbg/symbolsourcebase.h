@@ -1,26 +1,62 @@
-#ifndef _SYMBOLSOURCEBASE_H_
-#define _SYMBOLSOURCEBASE_H_
+#pragma once
 
 #include "_global.h"
 
-#include <stdint.h>
 #include <vector>
-#include <functional>
 #include <map>
+#include <string>
+#include <functional>
+#include <algorithm>
+
+//http://en.cppreference.com/w/cpp/algorithm/lower_bound
+template<class ForwardIt, class T, class Compare = std::less<>>
+static ForwardIt binary_find(ForwardIt first, ForwardIt last, const T & value, Compare comp = {})
+{
+    // Note: BOTH type T and the type after ForwardIt is dereferenced
+    // must be implicitly convertible to BOTH Type1 and Type2, used in Compare.
+    // This is stricter than lower_bound requirement (see above)
+
+    first = std::lower_bound(first, last, value, comp);
+    return first != last && !comp(value, *first) ? first : last;
+}
 
 struct SymbolInfoGui
 {
     virtual void convertToGuiSymbol(duint base, SYMBOLINFO* info) const = 0;
+
+    void copyToGuiSymbol(duint modbase, SYMBOLINFO* info) const
+    {
+        convertToGuiSymbol(modbase, info);
+
+        if(!info->freeDecorated)
+        {
+            const char* name = info->decoratedSymbol;
+            size_t len = strlen(name);
+            info->decoratedSymbol = (char*)BridgeAlloc(len + 1);
+            memcpy(info->decoratedSymbol, name, len + 1);
+            info->freeDecorated = true;
+        }
+
+        if(!info->freeUndecorated)
+        {
+            const char* name = info->undecoratedSymbol;
+            size_t len = strlen(name);
+            info->undecoratedSymbol = (char*)BridgeAlloc(len + 1);
+            memcpy(info->undecoratedSymbol, name, len + 1);
+            info->freeUndecorated = true;
+        }
+    }
 };
 
 struct SymbolInfo : SymbolInfoGui
 {
-    duint rva;
-    duint size;
-    int32 disp;
+    duint rva = 0;
+    duint size = 0;
+    int32 disp = 0;
     String decoratedName;
     String undecoratedName;
-    bool publicSymbol;
+    bool publicSymbol = false;
+    bool functionSymbol = false;
 
     void convertToGuiSymbol(duint modbase, SYMBOLINFO* info) const override
     {
@@ -35,11 +71,30 @@ struct SymbolInfo : SymbolInfoGui
 
 struct LineInfo
 {
-    duint rva;
-    duint size;
-    duint disp;
-    int lineNumber;
+    duint rva = 0;
+    duint size = 0;
+    duint disp = 0;
+    int lineNumber = 0;
     String sourceFile;
+};
+
+struct NameIndex
+{
+    const char* name = nullptr;
+    size_t index = -1;
+
+    bool operator<(const NameIndex & b) const
+    {
+        return cmp(*this, b, false) < 0;
+    }
+
+    static int cmp(const NameIndex & a, const NameIndex & b, bool caseSensitive)
+    {
+        return (caseSensitive ? strcmp : StringUtils::hackicmp)(a.name, b.name);
+    }
+
+    static bool findByPrefix(const std::vector<NameIndex> & byName, const std::string & prefix, const std::function<bool(const NameIndex &)> & cbFound, bool caseSensitive);
+    static bool findByName(const std::vector<NameIndex> & byName, const std::string & name, NameIndex & foundIndex, bool caseSensitive);
 };
 
 using CbEnumSymbol = std::function<bool(const SymbolInfo &)>;
@@ -92,7 +147,12 @@ public:
 
     virtual bool cancelLoading()
     {
-        return false;
+        return false; // Stub
+    }
+
+    virtual void waitUntilLoaded()
+    {
+        // Stub
     }
 
     // Get the symbol at the specified address, will return false if not found.
@@ -108,7 +168,7 @@ public:
     }
 
     // only call if isOpen && !isLoading
-    virtual void enumSymbols(const CbEnumSymbol & cbEnum)
+    virtual void enumSymbols(const CbEnumSymbol & cbEnum, duint beginRva = 0, duint endRva = -1)
     {
         // Stub
     }
@@ -144,5 +204,3 @@ public:
 };
 
 static SymbolSourceBase EmptySymbolSource;
-
-#endif // _SYMBOLSOURCEBASE_H_

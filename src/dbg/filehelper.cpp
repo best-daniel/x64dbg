@@ -9,15 +9,20 @@ bool FileHelper::ReadAllData(const String & fileName, std::vector<unsigned char>
         Handle hFile = CreateFileW(StringUtils::Utf8ToUtf16(fileName).c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
         if(hFile == INVALID_HANDLE_VALUE)
             return false;
-        unsigned int filesize = GetFileSize(hFile, nullptr);
-        if(!filesize)
+        LARGE_INTEGER fileSizeLI;
+        if(!GetFileSizeEx(hFile, &fileSizeLI))
+            return false;
+        if(fileSizeLI.QuadPart == 0)
         {
             content.clear();
             return true;
         }
+        if(fileSizeLI.QuadPart > MAXDWORD)
+            return false; // File too large to read into memory
+        DWORD filesize = (DWORD)fileSizeLI.QuadPart;
         content.resize(filesize);
         DWORD read = 0;
-        return !!ReadFile(hFile, content.data(), filesize, &read, nullptr);
+        return !!ReadFile(hFile, content.data(), filesize, &read, nullptr) && read == filesize;
     }
     else
     {
@@ -47,11 +52,13 @@ bool FileHelper::ReadAllData(const String & fileName, std::vector<unsigned char>
 
 bool FileHelper::WriteAllData(const String & fileName, const void* data, size_t size)
 {
+    if(size > MAXDWORD)
+        return false;
     Handle hFile = CreateFileW(StringUtils::Utf8ToUtf16(fileName).c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
     if(hFile == INVALID_HANDLE_VALUE)
         return false;
     DWORD written = 0;
-    return !!WriteFile(hFile, data, DWORD(size), &written, nullptr);
+    return !!WriteFile(hFile, data, DWORD(size), &written, nullptr) && written == size;
 }
 
 bool FileHelper::ReadAllText(const String & fileName, String & content)

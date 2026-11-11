@@ -1,6 +1,5 @@
 #include "cmd-tracing.h"
 #include "debugger.h"
-#include "historycontext.h"
 #include "threading.h"
 #include "module.h"
 #include "console.h"
@@ -11,13 +10,18 @@
 
 extern std::vector<std::pair<duint, duint>> RunToUserCodeBreakpoints;
 
-static bool cbDebugConditionalTrace(void(*callback)(), bool stepOver, int argc, char* argv[])
+static bool genericConditionalTraceCommand(TITANCBSTEP callback, STEPFUNCTION stepFunction, int argc, char* argv[])
 {
     if(IsArgumentsLessThan(argc, 2))
         return false;
     if(dbgtraceactive())
     {
         dputs(QT_TRANSLATE_NOOP("DBG", "Trace already active"));
+        return false;
+    }
+    if(dbgisrunning())
+    {
+        dputs(QT_TRANSLATE_NOOP("DBG", "Cannot start a trace when running, pause execution first."));
         return false;
     }
     duint maxCount;
@@ -30,72 +34,110 @@ static bool cbDebugConditionalTrace(void(*callback)(), bool stepOver, int argc, 
         dprintf(QT_TRANSLATE_NOOP("DBG", "Invalid expression \"%s\"\n"), argv[1]);
         return false;
     }
-    HistoryClear();
 
-    if(stepOver)
-        StepOver((void*)callback);
+    stepFunction(callback);
+    return cbDebugRunInternal(1, argv, history_clear);
+}
+
+static bool conditionalTraceIntoCommand(TITANCBSTEP callback, int argc, char* argv[])
+{
+    // Select step function based on party filter
+    STEPFUNCTION stepFunction;
+    auto party = dbggettracepartyfilter();
+    if(party == mod_user)
+        stepFunction = StepIntoUser;
+    else if(party == mod_system)
+        stepFunction = StepIntoSystem;
+    else if(party == -1)
+        stepFunction = StepIntoWow64;
     else
-        StepIntoWow64((void*)callback);
-    return cbDebugRunInternal(1, argv);
+    {
+        dprintf(QT_TRANSLATE_NOOP("DBG", "Unsupported party filter: %d\n"), party);
+        return false;
+    }
+    return genericConditionalTraceCommand(callback, stepFunction, argc, argv);
+}
+
+static bool conditionalTraceOverCommand(TITANCBSTEP callback, int argc, char* argv[])
+{
+    // Select step function based on party filter
+    STEPFUNCTION stepFunction;
+    auto party = dbggettracepartyfilter();
+    if(party == mod_user)
+        stepFunction = StepOverUser;
+    else if(party == mod_system)
+        stepFunction = StepOverSystem;
+    else if(party == -1)
+        stepFunction = StepOverWrapper;
+    else
+    {
+        dprintf(QT_TRANSLATE_NOOP("DBG", "Unsupported party filter: %d\n"), party);
+        return false;
+    }
+    return genericConditionalTraceCommand(callback, stepFunction, argc, argv);
 }
 
 bool cbDebugTraceIntoConditional(int argc, char* argv[])
 {
-    return cbDebugConditionalTrace(cbTraceIntoConditionalStep, false, argc, argv);
+    return conditionalTraceIntoCommand(cbTraceIntoConditionalStep, argc, argv);
 }
 
 bool cbDebugTraceOverConditional(int argc, char* argv[])
 {
-    return cbDebugConditionalTrace(cbTraceOverConditionalStep, true, argc, argv);
+    return conditionalTraceOverCommand(cbTraceOverConditionalStep, argc, argv);
 }
 
 bool cbDebugTraceIntoBeyondTraceRecord(int argc, char* argv[])
 {
     if(argc == 1)
     {
-        char* new_argv[] = { "tibt", "0" };
-        return cbDebugConditionalTrace(cbTraceIntoBeyondTraceRecordStep, false, 2, new_argv);
+        const char* new_argv[] = { "tibt", "0" };
+        return conditionalTraceIntoCommand(cbTraceIntoBeyondTraceRecordStep, 2, (char**)new_argv);
     }
     else
-        return cbDebugConditionalTrace(cbTraceIntoBeyondTraceRecordStep, false, argc, argv);
+        return conditionalTraceIntoCommand(cbTraceIntoBeyondTraceRecordStep, argc, argv);
 }
 
 bool cbDebugTraceOverBeyondTraceRecord(int argc, char* argv[])
 {
     if(argc == 1)
     {
-        char* new_argv[] = { "tobt", "0" };
-        return cbDebugConditionalTrace(cbTraceOverBeyondTraceRecordStep, true, 2, new_argv);
+        const char* new_argv[] = { "tobt", "0" };
+        return conditionalTraceOverCommand(cbTraceOverBeyondTraceRecordStep, 2, (char**)new_argv);
     }
     else
-        return cbDebugConditionalTrace(cbTraceOverBeyondTraceRecordStep, true, argc, argv);
+        return conditionalTraceOverCommand(cbTraceOverBeyondTraceRecordStep, argc, argv);
 }
 
 bool cbDebugTraceIntoIntoTraceRecord(int argc, char* argv[])
 {
     if(argc == 1)
     {
-        char* new_argv[] = { "tiit", "0" };
-        return cbDebugConditionalTrace(cbTraceIntoIntoTraceRecordStep, false, 2, new_argv);
+        const char* new_argv[] = { "tiit", "0" };
+        return conditionalTraceIntoCommand(cbTraceIntoIntoTraceRecordStep, 2, (char**)new_argv);
     }
     else
-        return cbDebugConditionalTrace(cbTraceIntoIntoTraceRecordStep, false, argc, argv);
+        return conditionalTraceIntoCommand(cbTraceIntoIntoTraceRecordStep, argc, argv);
 }
 
 bool cbDebugTraceOverIntoTraceRecord(int argc, char* argv[])
 {
     if(argc == 1)
     {
-        char* new_argv[] = { "toit", "0" };
-        return cbDebugConditionalTrace(cbTraceOverIntoTraceRecordStep, true, 2, new_argv);
+        const char* new_argv[] = { "toit", "0" };
+        return conditionalTraceOverCommand(cbTraceOverIntoTraceRecordStep, 2, (char**)new_argv);
     }
     else
-        return cbDebugConditionalTrace(cbTraceOverIntoTraceRecordStep, true, argc, argv);
+        return conditionalTraceOverCommand(cbTraceOverIntoTraceRecordStep, argc, argv);
 }
 
 bool cbDebugRunToParty(int argc, char* argv[])
 {
-    HistoryClear();
+    if(dbgisrunning())
+    {
+        dputs(QT_TRANSLATE_NOOP("DBG", "Cannot start a trace when running, pause execution first."));
+        return false;
+    }
     EXCLUSIVE_ACQUIRE(LockRunToUserCode);
     if(!RunToUserCodeBreakpoints.empty())
     {
@@ -115,19 +157,19 @@ bool cbDebugRunToParty(int argc, char* argv[])
                 if(!BpGet(j.addr, BPMEMORY, nullptr, &bp))
                 {
                     size_t size = DbgMemGetPageSize(j.addr);
-                    RunToUserCodeBreakpoints.push_back(std::make_pair(j.addr, size));
-                    SetMemoryBPXEx(j.addr, size, UE_MEMORY_EXECUTE, false, (void*)cbRunToUserCodeBreakpoint);
+                    RunToUserCodeBreakpoints.emplace_back(j.addr, size);
+                    SetMemoryBPXEx(j.addr, size, UE_MEMORY_EXECUTE, false, cbRunToUserCodeBreakpoint);
                 }
             }
         }
     });
-    return cbDebugRunInternal(1, argv);
+    return cbDebugRunInternal(1, argv, history_clear);
 }
 
 bool cbDebugRunToUserCode(int argc, char* argv[])
 {
-    char* newargv[] = { "RunToParty", "0" };
-    return cbDebugRunToParty(2, newargv);
+    const char* newargv[] = { "RunToParty", "0" };
+    return cbDebugRunToParty(2, (char**)newargv);
 }
 
 bool cbDebugTraceSetLog(int argc, char* argv[])
@@ -154,31 +196,49 @@ bool cbDebugTraceSetCommand(int argc, char* argv[])
     return true;
 }
 
-bool cbDebugTraceSetSwitchCondition(int argc, char* argv[])
-{
-    auto condition = argc > 1 ? argv[1] : "";
-    if(!dbgsettraceswitchcondition(condition))
-    {
-        dprintf(QT_TRANSLATE_NOOP("DBG", "Invalid expression \"%s\"\n"), condition);
-        return false;
-    }
-    return true;
-}
-
 bool cbDebugTraceSetLogFile(int argc, char* argv[])
 {
     auto fileName = argc > 1 ? argv[1] : "";
     return dbgsettracelogfile(fileName);
 }
 
-bool cbDebugStartRunTrace(int argc, char* argv[])
+bool cbDebugTraceSetStepFilter(int argc, char* argv[])
 {
     if(IsArgumentsLessThan(argc, 2))
         return false;
-    return _dbg_dbgenableRunTrace(true, argv[1]);
+
+    auto filter = argv[1];
+    if(_stricmp(filter, "none") == 0)
+    {
+        dbgsettracepartyfilter(-1);
+        dputs(QT_TRANSLATE_NOOP("DBG", "Step filter set to: none"));
+    }
+    else if(_stricmp(filter, "user") == 0)
+    {
+        dbgsettracepartyfilter(mod_user);
+        dputs(QT_TRANSLATE_NOOP("DBG", "Step filter set to: user"));
+    }
+    else if(_stricmp(filter, "system") == 0)
+    {
+        dbgsettracepartyfilter(mod_system);
+        dputs(QT_TRANSLATE_NOOP("DBG", "Step filter set to: system"));
+    }
+    else
+    {
+        dprintf(QT_TRANSLATE_NOOP("DBG", "Invalid step filter \"%s\", valid options are: none, user, system\n"), filter);
+        return false;
+    }
+    return true;
 }
 
-bool cbDebugStopRunTrace(int argc, char* argv[])
+bool cbDebugStartTraceRecording(int argc, char* argv[])
 {
-    return _dbg_dbgenableRunTrace(false, nullptr);
+    if(IsArgumentsLessThan(argc, 2))
+        return false;
+    return TraceRecord.enableTraceRecording(true, argv[1]);
+}
+
+bool cbDebugStopTraceRecording(int argc, char* argv[])
+{
+    return TraceRecord.enableTraceRecording(false, nullptr);
 }

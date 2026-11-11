@@ -1,14 +1,15 @@
 #pragma once
 
-#include "PDBDiaTypes.h"
+#include "pdbdiatypes.h"
 
 #include <vector>
 #include <map>
 #include <string>
-#include <set>
 #include <unordered_set>
-#include <unordered_map>
+#include <atomic>
+#include <functional>
 
+struct IStream;
 struct IDiaDataSource;
 struct IDiaSession;
 struct IDiaSymbol;
@@ -19,8 +20,8 @@ public:
     struct Query_t
     {
         std::function<bool(DiaSymbol_t &)> callback;
-        bool collectUndecoratedNames;
-        bool collectSize;
+        bool collectUndecoratedNames = false;
+        bool collectSize = false;
     };
 
 private:
@@ -50,7 +51,7 @@ public:
 
     bool close();
 
-    bool enumerateLineNumbers(uint32_t rva, uint32_t size, std::vector<DiaLineInfo_t> & lines, std::map<DWORD, std::string> & files);
+    bool enumerateLineNumbers(uint32_t rva, uint32_t size, std::vector<DiaLineInfo_t> & lines, std::map<DWORD, std::string> & files, const std::atomic<bool> & cancelled);
 
     bool enumerateLexicalHierarchy(const Query_t & query);
 

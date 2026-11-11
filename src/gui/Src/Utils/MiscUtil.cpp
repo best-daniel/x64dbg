@@ -1,15 +1,25 @@
 #include "MiscUtil.h"
-#include <windows.h>
+#include <QtWin>
+#include <QApplication>
+#include <QMessageBox>
+#include <QCheckBox>
+#include <QDir>
+#include <QPixmap>
+#include <QPainter>
 #include "LineEditDialog.h"
 #include "ComboBoxDialog.h"
-#include <QMessageBox>
 #include "StringUtil.h"
+#include "BrowseDialog.h"
+#include <thread>
 
 void SetApplicationIcon(WId winId)
 {
-    HICON hIcon = LoadIcon(GetModuleHandleW(0), MAKEINTRESOURCE(100));
-    SendMessageW((HWND)winId, WM_SETICON, ICON_BIG, (LPARAM)hIcon);
-    DestroyIcon(hIcon);
+    std::thread([winId]
+    {
+        HICON hIcon = LoadIcon(GetModuleHandleW(0), MAKEINTRESOURCE(100));
+        SendMessageW((HWND)winId, WM_SETICON, ICON_BIG, (LPARAM)hIcon);
+        DestroyIcon(hIcon);
+    }).detach();
 }
 
 QByteArray & ByteReverse(QByteArray & array)
@@ -36,10 +46,10 @@ QByteArray ByteReverse(QByteArray && array)
     return array;
 }
 
-bool SimpleInputBox(QWidget* parent, const QString & title, QString defaultValue, QString & output, const QString & placeholderText, QIcon* icon)
+bool SimpleInputBox(QWidget* parent, const QString & title, QString defaultValue, QString & output, const QString & placeholderText, const QIcon & icon)
 {
     LineEditDialog mEdit(parent);
-    mEdit.setWindowIcon(icon ? *icon : parent->windowIcon());
+    mEdit.setWindowIcon(icon.isNull() ? parent->windowIcon() : icon);
     mEdit.setText(defaultValue);
     mEdit.setPlaceholderText(placeholderText);
     mEdit.setWindowTitle(title);
@@ -53,10 +63,10 @@ bool SimpleInputBox(QWidget* parent, const QString & title, QString defaultValue
         return false;
 }
 
-bool SimpleChoiceBox(QWidget* parent, const QString & title, QString defaultValue, const QStringList & choices, QString & output, bool editable, const QString & placeholderText, QIcon* icon, int minimumContentsLength)
+bool SimpleChoiceBox(QWidget* parent, const QString & title, QString defaultValue, const QStringList & choices, QString & output, bool editable, const QString & placeholderText, const QIcon & icon, int minimumContentsLength)
 {
     ComboBoxDialog mChoice(parent);
-    mChoice.setWindowIcon(icon ? *icon : parent->windowIcon());
+    mChoice.setWindowIcon(icon.isNull() ? icon : parent->windowIcon());
     mChoice.setEditable(editable);
     mChoice.setItems(choices);
     mChoice.setText(defaultValue);
@@ -74,19 +84,36 @@ bool SimpleChoiceBox(QWidget* parent, const QString & title, QString defaultValu
         return false;
 }
 
-void SimpleErrorBox(QWidget* parent, const QString & title, const QString & text)
+void SimpleErrorBox(QWidget* parent, const QString & title, const QString & text, const char* doNotShowAgainSetting)
 {
+    duint currentSetting = 0;
+    if(doNotShowAgainSetting && BridgeSettingGetUint("Gui", doNotShowAgainSetting, &currentSetting) && currentSetting)
+        return;
+
     QMessageBox msg(QMessageBox::Critical, title, text, QMessageBox::NoButton, parent);
-    msg.setWindowIcon(DIcon("compile-error.png"));
+    msg.setWindowIcon(DIcon("fatal-error"));
     msg.setParent(parent, Qt::Dialog);
     msg.setWindowFlags(msg.windowFlags() & (~Qt::WindowContextHelpButtonHint));
+
+    QCheckBox* checkBox = nullptr;
+    if(doNotShowAgainSetting)
+    {
+        checkBox = new QCheckBox(QObject::tr("Do not show again"));
+        msg.setCheckBox(checkBox);
+    }
+
     msg.exec();
+
+    if(doNotShowAgainSetting)
+    {
+        BridgeSettingSetUint("Gui", doNotShowAgainSetting, checkBox->isChecked());
+    }
 }
 
 void SimpleWarningBox(QWidget* parent, const QString & title, const QString & text)
 {
     QMessageBox msg(QMessageBox::Warning, title, text, QMessageBox::NoButton, parent);
-    msg.setWindowIcon(DIcon("compile-warning.png"));
+    msg.setWindowIcon(DIcon("exclamation"));
     msg.setParent(parent, Qt::Dialog);
     msg.setWindowFlags(msg.windowFlags() & (~Qt::WindowContextHelpButtonHint));
     msg.exec();
@@ -95,7 +122,7 @@ void SimpleWarningBox(QWidget* parent, const QString & title, const QString & te
 void SimpleInfoBox(QWidget* parent, const QString & title, const QString & text)
 {
     QMessageBox msg(QMessageBox::Information, title, text, QMessageBox::NoButton, parent);
-    msg.setWindowIcon(DIcon("information.png"));
+    msg.setWindowIcon(DIcon("information"));
     msg.setParent(parent, Qt::Dialog);
     msg.setWindowFlags(msg.windowFlags() & (~Qt::WindowContextHelpButtonHint));
     msg.exec();
@@ -137,6 +164,8 @@ QString getSymbolicNameStr(duint addr)
         finalText = QString("%1.%2").arg(moduleText).arg(addrText);
     else if(bHasLabel) //<label>
         finalText = QString("<%1>").arg(labelText);
+    else if(addr == 0)
+        finalText = addrText;
     else
     {
         finalText = addrText;
@@ -152,15 +181,158 @@ QString getSymbolicNameStr(duint addr)
             if(c.isPrint() || c.isSpace())
                 finalText += QString(" L'%1'").arg(EscapeCh(c));
         }
+        else if((addr & 0xFFFFFFFFF0000000ull) == 0xC0000000)
+        {
+            auto format = QString("{ntstatus@%1}").arg(ToHexString(addr));
+            if(DbgFunctions()->StringFormatInline(format.toUtf8().constData(), sizeof(string), string))
+            {
+                auto colon = strchr(string, ':');
+                if(colon)
+                    *colon = '\0';
+                finalText += " ";
+                finalText += string;
+            }
+        }
     }
     return finalText;
+}
+
+QIcon getFileIcon(QString file)
+{
+    SHFILEINFOW info;
+    if(SHGetFileInfoW((const wchar_t*)file.utf16(), 0, &info, sizeof(info), SHGFI_ICON) == 0)
+        return QIcon(); //API error
+    QIcon result = QIcon(QtWin::fromHICON(info.hIcon));
+    DestroyIcon(info.hIcon);
+    return result;
+}
+
+static QString encodeCSVfield(QString cell, bool addSeparators, bool isTSV)
+{
+    if(isTSV)
+    {
+        if(addSeparators)
+            cell.append('\t');
+    }
+    else
+    {
+        if(cell.contains('"') || cell.contains(',') || cell.contains('\r') || cell.contains('\n'))
+        {
+            if(cell.contains('"'))
+                cell = cell.replace("\"", "\"\"");
+            cell = "\"" + cell + "\"";
+        }
+        if(addSeparators)
+            cell.append(',');
+    }
+    return cell;
+}
+
+//Export table in CSV. TODO: Display a dialog where the user choose what column to export and in which encoding
+bool ExportCSV(dsint rows, dsint columns, std::vector<QString> headers, std::function<QString(dsint, dsint)> getCellContent)
+{
+    BrowseDialog browse(
+        nullptr,
+        QApplication::translate("ExportCSV", "Export data in CSV/TSV format"),
+        QApplication::translate("ExportCSV", "Enter the CSV/TSV file name to export"),
+        QApplication::translate("ExportCSV", "CSV files (*.csv);;TSV files (*.tsv);;All files (*.*)"),
+        getDbPath("export.csv", true),
+        true
+    );
+    browse.setWindowIcon(DIcon("database-export"));
+    if(browse.exec() == QDialog::Accepted)
+    {
+        FILE* csv;
+        bool utf16;
+        bool isTSV;
+        isTSV = browse.path.endsWith(".tsv", Qt::CaseInsensitive);
+        auto err = _wfopen_s(&csv, browse.path.toStdWString().c_str(), L"wb");
+        if(err != 0 || csv == nullptr)
+        {
+            goto FAILED_NOFCLOSE;
+        }
+        else
+        {
+            duint setting;
+            if(BridgeSettingGetUint("Misc", "Utf16LogRedirect", &setting))
+                utf16 = !!setting; // UTF-16 encoding with BOM and CR/LF line ending
+            else
+                utf16 = false; // UTF-8 encoding with LF line ending without BOM
+            if(utf16 && ftell(csv) == 0)
+            {
+                unsigned short BOM = 0xfeff;
+                fwrite(&BOM, 2, 1, csv);
+            }
+            dsint row, column;
+            QString text;
+            if(headers.size() > 0)
+            {
+                for(column = 0; column < columns; column++)
+                {
+                    text = text + encodeCSVfield(headers.at(column), column != columns - 1, isTSV);
+                }
+                if(utf16)
+                {
+                    text.append("\r\n");
+                    if(!fwrite(text.utf16(), text.length(), 2, csv))
+                        goto FAILED;
+                }
+                else
+                {
+                    text.append("\n");
+                    QByteArray utf8;
+                    utf8 = text.toUtf8();
+                    if(!fwrite(utf8.constData(), utf8.size(), 1, csv))
+                        goto FAILED;
+                }
+            }
+            for(row = 0; row < rows; row++)
+            {
+                text.clear();
+                for(column = 0; column < columns; column++)
+                {
+                    text.append(encodeCSVfield(getCellContent(row, column), column != columns - 1, isTSV));
+                }
+                if(utf16)
+                {
+                    text.append("\r\n");
+                    if(!fwrite(text.utf16(), text.length(), 2, csv))
+                        goto FAILED;
+                }
+                else
+                {
+                    text.append("\n");
+                    QByteArray utf8;
+                    utf8 = text.toUtf8();
+                    if(!fwrite(utf8.constData(), utf8.size(), 1, csv))
+                        goto FAILED;
+                }
+            }
+            fclose(csv);
+            GuiAddLogMessage((isTSV ? QApplication::translate("ExportCSV", "Saved TSV data at %1\n") : QApplication::translate("ExportCSV", "Saved CSV data at %1\n")).arg(browse.path).toUtf8().constData());
+            return true;
+        }
+FAILED: // I/O failure handler, print error message to log and return.
+        fclose(csv);
+FAILED_NOFCLOSE:
+        GuiAddLogMessage((isTSV ? QApplication::translate("ExportCSV", "TSV export error\n") : QApplication::translate("ExportCSV", "CSV export error\n")).toUtf8().constData());
+        return false;
+    }
+    else
+        return false;
+}
+
+static bool allowIcons()
+{
+    duint setting = 0;
+    return !BridgeSettingGetUint("Gui", "NoIcons", &setting) || !setting;
 }
 
 static bool allowSeasons()
 {
     srand(GetTickCount());
     duint setting = 0;
-    return !BridgeSettingGetUint("Misc", "NoSeasons", &setting) || !setting;
+    return !BridgeSettingGetUint("Gui", "NoSeasons", &setting) || !setting;
 }
 
 static bool isChristmas()
@@ -188,16 +360,107 @@ bool isEaster()
     return date.month() == MM && date.day() >= DD - 2 && date.day() <= DD + 1;
 }
 
-QString couldItBeSeasonal(QString icon)
+bool isSeasonal()
 {
+    return (isChristmas() || isEaster());
+}
+
+QIcon DIconHelper(QString name)
+{
+    if(name.endsWith(".png"))
+        name = name.left(name.length() - 4);
+    static bool icons = allowIcons();
+    if(!icons)
+        return QIcon();
     static bool seasons = allowSeasons();
     static bool christmas = isChristmas();
     static bool easter = isEaster();
-    if(!seasons)
-        return icon;
-    if(christmas)
-        return QString("christmas%1.png").arg(rand() % 8 + 1);
-    else if(easter)
-        return QString("easter%1.png").arg(rand() % 8 + 1);
-    return icon;
+    if(seasons)
+    {
+        if(christmas)
+            name = QString("christmas%1").arg(rand() % 8 + 1);
+        else if(easter)
+            name = QString("easter%1").arg(rand() % 8 + 1);
+    }
+    return QIcon::fromTheme(name);
+}
+
+QString withDateTimeSuffix(const QString & path)
+{
+    QString result = path;
+    auto extensionIdx = result.lastIndexOf('.');
+    if(extensionIdx == -1)
+    {
+        extensionIdx = result.length();
+    }
+    result.insert(extensionIdx, "-" + isoDateTime());
+    return result;
+}
+
+QString getDbPath(const QString & filename, bool addDateTimeSuffix)
+{
+    auto path = QString("%1/db").arg(QString::fromWCharArray(BridgeUserDirectory()));
+    if(!filename.isEmpty())
+    {
+        path += '/';
+        path += filename;
+        // Add a date suffix before the extension
+        if(addDateTimeSuffix)
+        {
+            path = withDateTimeSuffix(path);
+        }
+    }
+    return QDir::toNativeSeparators(path);
+}
+
+QString mainModuleName(bool extension)
+{
+    auto base = DbgEval("mod.main()");
+    char name[MAX_MODULE_SIZE] = "";
+    if(base && DbgFunctions()->ModNameFromAddr(base, name, extension))
+    {
+        return name;
+    }
+    return QString();
+}
+
+QString mainModulePath()
+{
+    auto base = DbgEval("mod.main()");
+    char name[MAX_MODULE_SIZE] = "";
+    char path[MAX_MODULE_SIZE] = "";
+    if(base && DbgFunctions()->ModNameFromAddr(base, name, false) && DbgFunctions()->ModPathFromName(name, path, MAX_MODULE_SIZE))
+    {
+        return path;
+    }
+    return QString();
+}
+
+QString getProgramPath(const QString & filename, bool addDateTimeSuffix)
+{
+    auto path = QFileInfo(mainModulePath()).dir().path();
+    if(!filename.isEmpty())
+    {
+        path += '/';
+        path += filename;
+        // Add a date suffix before the extension
+        if(addDateTimeSuffix)
+        {
+            path = withDateTimeSuffix(path);
+        }
+    }
+    return QDir::toNativeSeparators(path);
+}
+
+QIcon ColorIcon(QColor color, int size)
+{
+    QPixmap pixmap(size, size);
+    color.setAlpha(255);
+    pixmap.fill(color);
+
+    QPainter painter(&pixmap);
+    painter.setPen(QColor(0, 0, 0, 100));
+    painter.drawRect(0, 0, size - 1, size - 1);
+
+    return QIcon(pixmap);
 }

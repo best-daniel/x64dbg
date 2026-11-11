@@ -4,9 +4,30 @@
 #include "memory.h"
 #include "recursiveanalysis.h"
 #include "function.h"
+#include "module.h"
 #include "stringformat.h"
 #include "value.h"
 #include "variable.h"
+
+bool cbShowThreadId(int argc, char* argv[])
+{
+    if(argc > 1)
+    {
+        duint threadId = 0;
+        if(!valfromstring(argv[1], &threadId, false))
+            return false;
+
+        SELECTIONDATA newSelection = { threadId, threadId };
+        if(!GuiSelectionSet(GUI_THREADS, &newSelection))
+        {
+            dprintf(QT_TRANSLATE_NOOP("DBG", "Invalid thread %s\n"), formatpidtid((DWORD)threadId).c_str());
+            return false;
+        }
+    }
+
+    GuiShowThreads();
+    return true;
+}
 
 bool cbDebugDisasm(int argc, char* argv[])
 {
@@ -47,7 +68,15 @@ bool cbDebugDump(int argc, char* argv[])
         GuiDumpAtN(addr, int(index));
     }
     else
-        GuiDumpAt(addr);
+    {
+        ACTIVEVIEW activeView;
+        GuiGetActiveView(&activeView);
+        int dumpIndex;
+        if(sscanf_s(activeView.title, "Dump %d", &dumpIndex) == 1)
+            GuiDumpAtN(addr, dumpIndex);
+        else
+            GuiDumpAt(addr);
+    }
     GuiShowCpu();
     GuiFocusView(GUI_DUMP);
     return true;
@@ -93,44 +122,68 @@ bool cbDebugMemmapdump(int argc, char* argv[])
 bool cbInstrGraph(int argc, char* argv[])
 {
     auto options = argc > 2 ? argv[2] : "";
-    auto force = !!strstr(options, "force");
+    auto forceRefresh = !!strstr(options, "force");
     auto silent = !!strstr(options, "silent");
-    duint entry;
-    if(argc < 2 || !valfromstring(argv[1], &entry))
-        entry = GetContextDataEx(hActiveThread, UE_CIP);
-    duint start, size, sel = entry;
-    if(FunctionGet(entry, &start))
-        entry = start;
-    auto base = MemFindBaseAddr(entry, &size);
-    if(!base || !MemIsValidReadPtr(entry))
+    duint userSelection = 0;
+    if(argc < 2 || !valfromstring(argv[1], &userSelection))
+        userSelection = GetContextDataEx(hActiveThread, UE_CIP);
+
+    // Find (heuristic) function entry point from user selection (0 if it cannot be determined)
+    const auto functionEntry = std::invoke([userSelection]
+    {
+        duint start = 0;
+        if(FunctionGet(userSelection, &start))
+            return start;
+        return ModFunctionEntryGuessFromAddr(userSelection);
+    });
+
+    // Navigate to user selection in the current graph, get cached graph entry point
+    const auto cachedEntry = GuiGraphAt(userSelection);
+
+    // Reuse the cached graph when the selection is inside it, unless the selection
+    // confidently belongs to a different function entry
+    const auto cacheInvalidated = cachedEntry == 0 || (functionEntry != 0 && cachedEntry != functionEntry);
+
+    // Rebuild the graph from the function entry, falling back to the cached entry
+    // (relevant for a forced refresh) and finally the user selection
+    const auto graphEntry = functionEntry != 0 ? functionEntry : (cachedEntry != 0 ? cachedEntry : userSelection);
+
+    // Make sure the address is valid
+    duint size = 0;
+    auto base = MemFindBaseAddr(graphEntry, &size);
+    if(!base || !MemIsValidReadPtr(graphEntry))
     {
         if(!silent)
-            dprintf(QT_TRANSLATE_NOOP("DBG", "Invalid address %p!\n"), entry);
+            dprintf(QT_TRANSLATE_NOOP("DBG", "Invalid address %p!\n"), graphEntry);
         return false;
     }
-    auto curEntry = GuiGraphAt(sel);
-    if(curEntry)
-        entry = curEntry;
-    if(!curEntry || force)
+
+    if(forceRefresh || cacheInvalidated)
     {
-        auto modbase = ModBaseFromAddr(base);
-        if(modbase)
-            base = modbase, size = ModSizeFromAddr(modbase);
-        RecursiveAnalysis analysis(base, size, entry, true);
+        const auto modbase = ModBaseFromAddr(base);
+        if(modbase != 0)
+        {
+            base = modbase;
+            size = ModSizeFromAddr(modbase);
+        }
+
+        RecursiveAnalysis analysis(base, size, graphEntry, true);
         analysis.Analyse();
-        auto graph = analysis.GetFunctionGraph(entry);
-        if(!graph)
+        auto graph = analysis.GetFunctionGraph(graphEntry);
+        if(graph == nullptr)
         {
             if(!silent)
                 dputs(QT_TRANSLATE_NOOP("DBG", "No graph generated..."));
             return false;
         }
         auto graphList = graph->ToGraphList();
-        if(!GuiLoadGraph(&graphList, sel))
+        if(!GuiLoadGraph(&graphList, userSelection))
             return false;
     }
+
     GuiUpdateAllViews();
-    GuiFocusView(GUI_GRAPH);
+    if(!silent)
+        GuiFocusView(GUI_GRAPH);
     return true;
 }
 
@@ -191,7 +244,7 @@ bool cbInstrRefadd(int argc, char* argv[])
     int index = GuiReferenceGetRowCount();
     GuiReferenceSetRowCount(index + 1);
     char addr_text[32] = "";
-    sprintf_s(addr_text, "%p", addr);
+    sprintf_s(addr_text, "%p", (void*)addr);
     GuiReferenceSetCellContent(index, 0, addr_text);
     GuiReferenceSetCellContent(index, 1, stringformatinline(argv[2]).c_str());
     GuiReferenceReloadData();
@@ -279,5 +332,61 @@ bool cbInstrFoldDisassembly(int argc, char* argv[])
         return false;
     }
     GuiFoldDisassembly(start, length);
+    return true;
+}
+
+bool cbDebugUpdateTitle(int argc, char* argv[])
+{
+    duint addr = 0;
+    if(argc > 1)
+    {
+        if(!valfromstring(argv[1], &addr))
+            addr = GetContextDataEx(hActiveThread, UE_CIP);
+    }
+    else
+    {
+        addr = GetContextDataEx(hActiveThread, UE_CIP);
+    }
+    DebugUpdateTitleAsync(addr, false);
+    return true;
+}
+
+bool cbShowReferences(int argc, char* argv[])
+{
+    GuiShowReferences();
+    return true;
+}
+
+bool cbSymbolsFollow(int argc, char* argv[])
+{
+    if(argc < 2)
+        return false;
+    duint addr;
+    if(!valfromstring(argv[1], &addr, false) || !MemIsValidReadPtr(addr, true))
+    {
+        dprintf(QT_TRANSLATE_NOOP("DBG", "Invalid address \"%s\"!\n"), argv[1]);
+        return false;
+    }
+
+    duint base = ModBaseFromAddr(addr);
+    if(!base)
+    {
+        dprintf(QT_TRANSLATE_NOOP("DBG", "Address \"%s\" doesn't belong to any module!\n"), argv[1]);
+        return false;
+    }
+
+    GuiSelectInSymbolsTab(base);
+    GuiFocusView(GUI_SYMMOD);
+    return true;
+}
+
+bool cbGotoTrace(int argc, char* argv[])
+{
+    duint index = 0;
+    if(IsArgumentsLessThan(argc, 2) || !valfromstring(argv[1], &index, false))
+        return false;
+
+    GuiGotoTrace(index);
+    GuiShowTrace();
     return true;
 }

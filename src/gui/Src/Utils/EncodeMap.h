@@ -1,14 +1,15 @@
-#ifndef ENCODEMAP_H
-#define ENCODEMAP_H
+#pragma once
+
+#include <cstdint>
 
 #include <QObject>
-#include "Imports.h"
+#include <Imports.h>
 
 class EncodeMap : public QObject
 {
     Q_OBJECT
 public:
-    explicit EncodeMap(QObject* parent = 0);
+    explicit EncodeMap(QObject* parent = nullptr);
     ~EncodeMap();
 
     void setMemoryRegion(duint va);
@@ -43,6 +44,8 @@ public:
             return 16;
         case enc_ymmword:
             return 32;
+        case enc_zmmword:
+            return 64;
         case enc_real4:
             return 4;
         case enc_real8:
@@ -80,8 +83,6 @@ public:
 protected:
     duint mBase;
     duint mSize;
-    byte* mBuffer;
+    uint8_t* mBuffer;
     duint mBufferSize;
 };
-
-#endif // ENCODEMAP_H

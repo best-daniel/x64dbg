@@ -1,8 +1,11 @@
 #include "stringutils.h"
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif // WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <cstdint>
 
-static inline bool convertLongLongNumber(const char* str, unsigned long long & result, int radix)
+bool StringUtils::convertLongLongNumber(const char* str, unsigned long long & result, int radix)
 {
     errno = 0;
     char* end;
@@ -16,7 +19,7 @@ static inline bool convertLongLongNumber(const char* str, unsigned long long & r
     return true;
 }
 
-static inline bool convertNumber(const char* str, size_t & result, int radix)
+bool StringUtils::convertNumber(const char* str, size_t & result, int radix)
 {
     unsigned long long llr;
     if(!convertLongLongNumber(str, llr, radix))
@@ -49,6 +52,33 @@ StringList StringUtils::Split(const String & s, char delim)
 {
     std::vector<String> elems;
     Split(s, delim, elems);
+    return elems;
+}
+
+void StringUtils::Split(const String & s, const String & delims, std::vector<String> & elems)
+{
+    elems.clear();
+    String item;
+    item.reserve(s.length());
+    for(size_t i = 0; i < s.length(); i++)
+    {
+        if(delims.find(s[i]) != String::npos)
+        {
+            if(!item.empty())
+                elems.push_back(item);
+            item.clear();
+        }
+        else
+            item.push_back(s[i]);
+    }
+    if(!item.empty())
+        elems.push_back(std::move(item));
+}
+
+StringList StringUtils::Split(const String & s, const String & delims)
+{
+    std::vector<String> elems;
+    Split(s, delims, elems);
     return elems;
 }
 
@@ -280,7 +310,7 @@ const String StringUtils::WHITESPACE = " \n\r\t";
 
 String StringUtils::Trim(const String & s, const String & delim)
 {
-    return TrimRight(TrimLeft(s));
+    return TrimRight(TrimLeft(s, delim), delim);
 }
 
 String StringUtils::TrimLeft(const String & s, const String & delim)
@@ -377,9 +407,27 @@ WString StringUtils::LocalCpToUtf16(const char* str)
     return convertedString;
 }
 
+String StringUtils::Utf16ToLocalCp(const WString & str)
+{
+    String convertedString;
+    if(str.size() == 0)
+        return convertedString;
+    int requiredSize = WideCharToMultiByte(CP_ACP, 0, str.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if(requiredSize > 0)
+    {
+        convertedString.resize(requiredSize - 1);
+        if(!WideCharToMultiByte(CP_ACP, 0, str.c_str(), -1, (char*)convertedString.c_str(), requiredSize, nullptr, nullptr))
+            convertedString.clear();
+    }
+    return convertedString;
+}
+
 //Taken from: https://stackoverflow.com/a/24315631
 void StringUtils::ReplaceAll(String & s, const String & from, const String & to)
 {
+    if(from.empty())
+        return;
+
     size_t start_pos = 0;
     while((start_pos = s.find(from, start_pos)) != std::string::npos)
     {
@@ -390,6 +438,9 @@ void StringUtils::ReplaceAll(String & s, const String & from, const String & to)
 
 void StringUtils::ReplaceAll(WString & s, const WString & from, const WString & to)
 {
+    if(from.empty())
+        return;
+
     size_t start_pos = 0;
     while((start_pos = s.find(from, start_pos)) != std::string::npos)
     {
@@ -398,7 +449,7 @@ void StringUtils::ReplaceAll(WString & s, const WString & from, const WString & 
     }
 }
 
-String StringUtils::vsprintf(const char* format, va_list args)
+String StringUtils::vsprintf(_In_z_ _Printf_format_string_ const char* format, va_list args)
 {
     char sbuffer[64] = "";
     if(_vsnprintf_s(sbuffer, _TRUNCATE, format, args) != -1)
@@ -419,7 +470,7 @@ String StringUtils::vsprintf(const char* format, va_list args)
     return String(buffer.data());
 }
 
-String StringUtils::sprintf(_Printf_format_string_ const char* format, ...)
+String StringUtils::sprintf(_In_z_ _Printf_format_string_ const char* format, ...)
 {
     va_list args;
     va_start(args, format);
@@ -428,7 +479,7 @@ String StringUtils::sprintf(_Printf_format_string_ const char* format, ...)
     return result;
 }
 
-WString StringUtils::vsprintf(const wchar_t* format, va_list args)
+WString StringUtils::vsprintf(_In_z_ _Printf_format_string_ const wchar_t* format, va_list args)
 {
     wchar_t sbuffer[64] = L"";
     if(_vsnwprintf_s(sbuffer, _TRUNCATE, format, args) != -1)
@@ -449,7 +500,7 @@ WString StringUtils::vsprintf(const wchar_t* format, va_list args)
     return WString(buffer.data());
 }
 
-WString StringUtils::sprintf(_Printf_format_string_ const wchar_t* format, ...)
+WString StringUtils::sprintf(_In_z_ _Printf_format_string_ const wchar_t* format, ...)
 {
     va_list args;
     va_start(args, format);
@@ -462,7 +513,7 @@ String StringUtils::ToLower(const String & s)
 {
     auto result = s;
     for(size_t i = 0; i < result.size(); i++)
-        result[i] = tolower(result[i]);
+        result[i] = ToLower(result[i]);
     return result;
 }
 
@@ -513,7 +564,7 @@ String StringUtils::ToHex(unsigned long long value)
 
 #define HEXLOOKUP "0123456789ABCDEF"
 
-String StringUtils::ToHex(unsigned char* buffer, size_t size, bool reverse)
+String StringUtils::ToHex(const unsigned char* buffer, size_t size, bool reverse)
 {
     String result;
     result.resize(size * 2);
@@ -526,7 +577,7 @@ String StringUtils::ToHex(unsigned char* buffer, size_t size, bool reverse)
     return result;
 }
 
-String StringUtils::ToCompressedHex(unsigned char* buffer, size_t size)
+String StringUtils::ToCompressedHex(const unsigned char* buffer, size_t size)
 {
     if(!size)
         return "";
@@ -602,4 +653,17 @@ bool StringUtils::FromCompressedHex(const String & text, std::vector<unsigned ch
         }
     }
     return true;
+}
+
+int StringUtils::hackicmp(const char* s1, const char* s2)
+{
+    unsigned char c1, c2;
+    while((c1 = *s1++) == (c2 = *s2++))
+        if(c1 == '\0')
+            return 0;
+    s1--, s2--;
+    while((c1 = ToLower(*s1++)) == (c2 = ToLower(*s2++)))
+        if(c1 == '\0')
+            return 0;
+    return c1 - c2;
 }
